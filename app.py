@@ -45,12 +45,24 @@ def report_html():
         return None
 
 
+def configured(*names):
+    return any(bool(os.getenv(name, "").strip()) for name in names)
+
+
 @app.get("/health")
 def health():
     return jsonify(
         status="ok",
         service="bgl-vobi-relatorio",
         report_loaded=report_html() is not None,
+        vobi_uuid_configured=configured("VOBI_UUID", "VOBI_CLIENT_UUID", "VOBI_INTEGRATION_UUID"),
+        vobi_secret_configured=configured("VOBI_CLIENT_SECRET", "VOBI_SECRET"),
+        email_configured=(
+            configured("SMTP_HOST")
+            and configured("SMTP_USER")
+            and configured("SMTP_PASSWORD")
+            and configured("REPORT_RECIPIENT")
+        ),
     )
 
 
