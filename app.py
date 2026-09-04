@@ -3,6 +3,7 @@ import hmac
 import os
 from functools import wraps
 
+import requests
 from flask import Flask, Response, jsonify, request
 
 
@@ -49,14 +50,31 @@ def configured(*names):
     return any(bool(os.getenv(name, "").strip()) for name in names)
 
 
+def vobi_token():
+    uuid = os.environ["VOBI_UUID"]
+    secret = os.environ["VOBI_CLIENT_SECRET"]
+    base_url = os.getenv("VOBI_API_BASE_URL", "https://api.vobi.com.br/v2").rstrip("/")
+    response = requests.post(
+        f"{base_url}/auth/token",
+        auth=(uuid, secret),
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    token = payload.get("jwt")
+    if not token:
+        raise RuntimeError("Resposta do Vobi sem JWT")
+    return token
+
+
 @app.get("/health")
 def health():
     return jsonify(
         status="ok",
         service="bgl-vobi-relatorio",
         report_loaded=report_html() is not None,
-        vobi_uuid_configured=configured("VOBI_UUID", "VOBI_CLIENT_UUID", "VOBI_INTEGRATION_UUID"),
-        vobi_secret_configured=configured("VOBI_CLIENT_SECRET", "VOBI_SECRET"),
+        vobi_uuid_configured=configured("VOBI_UUID"),
+        vobi_secret_configured=configured("VOBI_CLIENT_SECRET"),
         email_configured=(
             configured("SMTP_HOST")
             and configured("SMTP_USER")
@@ -64,6 +82,20 @@ def health():
             and configured("REPORT_RECIPIENT")
         ),
     )
+
+
+@app.get("/vobi/status")
+def vobi_status():
+    if not configured("VOBI_UUID") or not configured("VOBI_CLIENT_SECRET"):
+        return jsonify(status="not_configured"), 503
+    try:
+        vobi_token()
+        return jsonify(status="authenticated")
+    except requests.HTTPError as exc:
+        return jsonify(status="authentication_failed", http_status=exc.response.status_code), 502
+    except Exception:
+        app.logger.exception("Falha ao validar API Vobi")
+        return jsonify(status="connection_failed"), 502
 
 
 @app.get("/")
