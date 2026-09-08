@@ -1,5 +1,6 @@
 import base64
 import hmac
+import json
 import os
 from functools import wraps
 
@@ -127,7 +128,75 @@ def run_vobi_smoke_test():
     return result
 
 
+def run_vobi_schema_probe():
+    try:
+        docs_url = f"{vobi_base_url()}/docs.json"
+        response = requests.get(docs_url, timeout=20)
+        response.raise_for_status()
+        spec = response.json()
+        paths = spec.get("paths", {})
+        probe = {}
+        for path in (
+            "/v2/financial/installments",
+            "/v2/financial/totals",
+            "/v2/financial/dailyCashFlow",
+            "/v2/financial/bills",
+            "/v2/financial/summary",
+        ):
+            op = paths.get(path, {}).get("get", {})
+            probe[path] = {
+                "parameters": [
+                    {
+                        "name": p.get("name"),
+                        "in": p.get("in"),
+                        "required": p.get("required", False),
+                        "schema": p.get("schema", {}),
+                    }
+                    for p in op.get("parameters", [])
+                ],
+                "response_schema": (
+                    op.get("responses", {})
+                    .get("200", {})
+                    .get("content", {})
+                    .get("application/json", {})
+                    .get("schema", {})
+                ),
+            }
+
+        refs = set()
+        encoded = json.dumps(probe, ensure_ascii=False)
+        for chunk in encoded.split('"'):
+            if chunk.startswith("#/components/schemas/"):
+                refs.add(chunk.rsplit("/", 1)[-1])
+
+        schemas = spec.get("components", {}).get("schemas", {})
+        selected = {}
+        queue = list(refs)
+        seen = set()
+        while queue and len(seen) < 20:
+            name = queue.pop(0)
+            if name in seen or name not in schemas:
+                continue
+            seen.add(name)
+            schema = schemas[name]
+            selected[name] = schema
+            dumped = json.dumps(schema, ensure_ascii=False)
+            for chunk in dumped.split('"'):
+                if chunk.startswith("#/components/schemas/"):
+                    child = chunk.rsplit("/", 1)[-1]
+                    if child not in seen:
+                        queue.append(child)
+
+        safe = {"operations": probe, "schemas": selected}
+        app.logger.warning("VOBI_SCHEMA %s", json.dumps(safe, ensure_ascii=False)[:12000])
+        return {"status": "ok", "schema_count": len(selected)}
+    except Exception as exc:
+        app.logger.exception("VOBI_SCHEMA probe_failed")
+        return {"status": "failed", "error_type": type(exc).__name__}
+
+
 VOBI_SMOKE = run_vobi_smoke_test()
+VOBI_SCHEMA = run_vobi_schema_probe()
 
 
 @app.get("/health")
@@ -139,6 +208,7 @@ def health():
         vobi_uuid_configured=configured("VOBI_UUID"),
         vobi_secret_configured=configured("VOBI_CLIENT_SECRET"),
         vobi_smoke=VOBI_SMOKE,
+        vobi_schema=VOBI_SCHEMA,
         email_configured=(
             configured("SMTP_HOST")
             and configured("SMTP_USER")
