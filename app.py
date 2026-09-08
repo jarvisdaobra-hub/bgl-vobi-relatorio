@@ -86,13 +86,37 @@ try:
     startup_html, startup_data = generate_report()
     _CACHE.update(html=startup_html, data=startup_data, created=time.time())
     startup_meta = startup_data.get("meta", {})
+    top_projects = [
+        {
+            "name": row.get("name"),
+            "income": row.get("income"),
+            "expense": row.get("expense"),
+            "net": row.get("net"),
+            "region": row.get("region"),
+        }
+        for row in startup_data.get("projects", [])[:5]
+    ]
     REPORT_SMOKE = {
         "status": "ok",
+        "generated_at": startup_meta.get("generated_at"),
         "projected_rows": startup_meta.get("projected_rows"),
         "ignored_rows": startup_meta.get("ignored_rows"),
         "unknown_type_rows": startup_meta.get("unknown_type_rows"),
         "opening_balance_source": startup_meta.get("opening_balance_source"),
+        "opening_balance": startup_meta.get("opening_balance"),
+        "minimum_balance": startup_meta.get("minimum_balance"),
+        "minimum_balance_date": startup_meta.get("minimum_balance_date"),
+        "required_cash": startup_meta.get("required_cash"),
+        "final_balance_12m": startup_meta.get("final_balance_12m"),
+        "income_30": startup_meta.get("income_30"),
+        "expense_30": startup_meta.get("expense_30"),
+        "overdue_income": startup_meta.get("overdue_income"),
+        "overdue_expense": startup_meta.get("overdue_expense"),
+        "overdue_income_count": startup_meta.get("overdue_income_count"),
+        "overdue_expense_count": startup_meta.get("overdue_expense_count"),
         "lead_days_adjusted_rows": startup_meta.get("lead_days_adjusted_rows"),
+        "regions": startup_data.get("regions", {}),
+        "top_projects": top_projects,
     }
     app.logger.warning("REPORT_SMOKE %s", safe_log_summary(REPORT_SMOKE))
 except Exception as exc:
