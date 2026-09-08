@@ -1,14 +1,20 @@
-import base64
 import hmac
 import json
 import os
+import time
 from functools import wraps
 
-import requests
 from flask import Flask, Response, jsonify, request
+
+from reporting import generate_report, run_job, safe_log_summary, startup_smoke
 
 
 app = Flask(__name__)
+_CACHE = {"html": None, "data": None, "created": 0.0}
+
+
+def configured(name):
+    return bool(str(os.getenv(name, "")).strip())
 
 
 def authorized(username, password):
@@ -36,167 +42,50 @@ def require_auth(view):
     return wrapped
 
 
-def report_html():
-    encoded = os.getenv("REPORT_HTML_B64", "")
-    if not encoded:
-        return None
-    try:
-        return base64.b64decode(encoded, validate=True).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        app.logger.exception("REPORT_HTML_B64 invalido")
-        return None
+def internal_authorized():
+    expected = os.getenv("JOB_TOKEN", "")
+    header = request.headers.get("Authorization", "")
+    supplied = header.removeprefix("Bearer ").strip() if header.startswith("Bearer ") else ""
+    return bool(expected) and hmac.compare_digest(supplied, expected)
 
 
-def configured(*names):
-    return any(bool(os.getenv(name, "").strip()) for name in names)
+def cached_report(force=False):
+    ttl = max(0, int(os.getenv("REPORT_CACHE_SECONDS", "300")))
+    now = time.time()
+    if (
+        not force
+        and _CACHE["html"] is not None
+        and now - _CACHE["created"] <= ttl
+    ):
+        return _CACHE["html"], _CACHE["data"]
+
+    report_html, data = generate_report()
+    _CACHE.update(html=report_html, data=data, created=now)
+    return report_html, data
 
 
-def vobi_base_url():
-    return os.getenv("VOBI_API_BASE_URL", "https://api.vobi.com.br/v2").rstrip("/")
-
-
-def vobi_token():
-    uuid = os.environ["VOBI_UUID"]
-    secret = os.environ["VOBI_CLIENT_SECRET"]
-    response = requests.post(
-        f"{vobi_base_url()}/auth/token",
-        auth=(uuid, secret),
-        timeout=20,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    token = payload.get("jwt")
-    if not token:
-        raise RuntimeError("Resposta do Vobi sem JWT")
-    return token
-
-
-def vobi_get(path, token):
-    response = requests.get(
-        f"{vobi_base_url()}/{path.lstrip('/')}",
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=20,
-    )
-    return response
-
-
-def run_vobi_smoke_test():
-    result = {
-        "auth": "not_configured",
-        "financial_totals": None,
-        "daily_cash_flow": None,
-        "installments": None,
+def safe_result(result):
+    meta = result.get("meta", {})
+    return {
+        "status": "ok",
+        "email": result.get("email", {}),
+        "meta": {
+            "generated_at": meta.get("generated_at"),
+            "projected_rows": meta.get("projected_rows"),
+            "ignored_rows": meta.get("ignored_rows"),
+            "lead_days_adjusted_rows": meta.get("lead_days_adjusted_rows"),
+            "unknown_type_rows": meta.get("unknown_type_rows"),
+            "opening_balance_source": meta.get("opening_balance_source"),
+        },
     }
 
-    if not configured("VOBI_UUID") or not configured("VOBI_CLIENT_SECRET"):
-        app.logger.warning("VOBI_SMOKE auth=not_configured")
-        return result
 
-    try:
-        token = vobi_token()
-        result["auth"] = "authenticated"
-    except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        result["auth"] = f"authentication_failed:{status}"
-        app.logger.warning("VOBI_SMOKE auth=%s", result["auth"])
-        return result
-    except Exception:
-        result["auth"] = "connection_failed"
-        app.logger.exception("VOBI_SMOKE auth=connection_failed")
-        return result
-
-    checks = {
-        "financial_totals": "financial/totals",
-        "daily_cash_flow": "financial/dailyCashFlow",
-        "installments": "financial/installments",
-    }
-    for key, path in checks.items():
-        try:
-            response = vobi_get(path, token)
-            result[key] = response.status_code
-        except Exception:
-            result[key] = "connection_failed"
-            app.logger.exception("VOBI_SMOKE endpoint=%s connection_failed", path)
-
-    app.logger.warning(
-        "VOBI_SMOKE auth=%s financial_totals=%s daily_cash_flow=%s installments=%s",
-        result["auth"],
-        result["financial_totals"],
-        result["daily_cash_flow"],
-        result["installments"],
-    )
-    return result
-
-
-def run_vobi_schema_probe():
-    try:
-        docs_url = f"{vobi_base_url()}/docs.json"
-        response = requests.get(docs_url, timeout=20)
-        response.raise_for_status()
-        spec = response.json()
-        paths = spec.get("paths", {})
-        probe = {}
-        for path in (
-            "/v2/financial/installments",
-            "/v2/financial/totals",
-            "/v2/financial/dailyCashFlow",
-            "/v2/financial/bills",
-            "/v2/financial/summary",
-        ):
-            op = paths.get(path, {}).get("get", {})
-            probe[path] = {
-                "parameters": [
-                    {
-                        "name": p.get("name"),
-                        "in": p.get("in"),
-                        "required": p.get("required", False),
-                        "schema": p.get("schema", {}),
-                    }
-                    for p in op.get("parameters", [])
-                ],
-                "response_schema": (
-                    op.get("responses", {})
-                    .get("200", {})
-                    .get("content", {})
-                    .get("application/json", {})
-                    .get("schema", {})
-                ),
-            }
-
-        refs = set()
-        encoded = json.dumps(probe, ensure_ascii=False)
-        for chunk in encoded.split('"'):
-            if chunk.startswith("#/components/schemas/"):
-                refs.add(chunk.rsplit("/", 1)[-1])
-
-        schemas = spec.get("components", {}).get("schemas", {})
-        selected = {}
-        queue = list(refs)
-        seen = set()
-        while queue and len(seen) < 20:
-            name = queue.pop(0)
-            if name in seen or name not in schemas:
-                continue
-            seen.add(name)
-            schema = schemas[name]
-            selected[name] = schema
-            dumped = json.dumps(schema, ensure_ascii=False)
-            for chunk in dumped.split('"'):
-                if chunk.startswith("#/components/schemas/"):
-                    child = chunk.rsplit("/", 1)[-1]
-                    if child not in seen:
-                        queue.append(child)
-
-        safe = {"operations": probe, "schemas": selected}
-        app.logger.warning("VOBI_SCHEMA %s", json.dumps(safe, ensure_ascii=False)[:12000])
-        return {"status": "ok", "schema_count": len(selected)}
-    except Exception as exc:
-        app.logger.exception("VOBI_SCHEMA probe_failed")
-        return {"status": "failed", "error_type": type(exc).__name__}
-
-
-VOBI_SMOKE = run_vobi_smoke_test()
-VOBI_SCHEMA = run_vobi_schema_probe()
+try:
+    STARTUP_SMOKE = startup_smoke()
+    app.logger.warning("STARTUP_SMOKE %s", safe_log_summary(STARTUP_SMOKE))
+except Exception as exc:
+    STARTUP_SMOKE = {"vobi": "failed", "error_type": type(exc).__name__}
+    app.logger.exception("STARTUP_SMOKE failed")
 
 
 @app.get("/health")
@@ -204,45 +93,80 @@ def health():
     return jsonify(
         status="ok",
         service="bgl-vobi-relatorio",
-        report_loaded=report_html() is not None,
-        vobi_uuid_configured=configured("VOBI_UUID"),
-        vobi_secret_configured=configured("VOBI_CLIENT_SECRET"),
-        vobi_smoke=VOBI_SMOKE,
-        vobi_schema=VOBI_SCHEMA,
-        email_configured=(
-            configured("SMTP_HOST")
-            and configured("SMTP_USER")
-            and configured("SMTP_PASSWORD")
-            and configured("REPORT_RECIPIENT")
-        ),
+        vobi=STARTUP_SMOKE.get("vobi"),
+        installments=STARTUP_SMOKE.get("installments"),
+        balance_endpoint=STARTUP_SMOKE.get("balance_endpoint"),
+        email_configured=STARTUP_SMOKE.get("email_configured", False),
+        job_token_configured=configured("JOB_TOKEN"),
+        sample_key_count=len(STARTUP_SMOKE.get("sample_keys", [])),
     )
-
-
-@app.get("/vobi/status")
-def vobi_status():
-    if not configured("VOBI_UUID") or not configured("VOBI_CLIENT_SECRET"):
-        return jsonify(status="not_configured"), 503
-    try:
-        vobi_token()
-        return jsonify(status="authenticated"), 200
-    except requests.HTTPError as exc:
-        return jsonify(status="authentication_failed", http_status=exc.response.status_code), 502
-    except Exception:
-        app.logger.exception("Falha ao validar API Vobi")
-        return jsonify(status="connection_failed"), 502
 
 
 @app.get("/")
 @require_auth
 def index():
-    html = report_html()
-    if html is None:
-        return Response(
-            "Relatorio ainda nao carregado.",
-            status=503,
-            mimetype="text/plain",
+    try:
+        report_html, _ = cached_report(force=False)
+        return Response(report_html, mimetype="text/html")
+    except Exception:
+        app.logger.exception("Falha ao gerar relatorio Vobi")
+        return Response("Falha ao gerar relatorio VOBI.", status=502, mimetype="text/plain")
+
+
+@app.get("/report/status")
+@require_auth
+def report_status():
+    try:
+        _, data = cached_report(force=False)
+        meta = data["meta"]
+        return jsonify(
+            status="ok",
+            generated_at=meta.get("generated_at"),
+            projected_rows=meta.get("projected_rows"),
+            ignored_rows=meta.get("ignored_rows"),
+            unknown_type_rows=meta.get("unknown_type_rows"),
+            opening_balance_source=meta.get("opening_balance_source"),
         )
-    return Response(html, mimetype="text/html")
+    except Exception:
+        app.logger.exception("Falha no status do relatorio")
+        return jsonify(status="failed"), 502
+
+
+@app.post("/run")
+@require_auth
+def manual_run():
+    try:
+        result = run_job(send_email=True)
+        _CACHE.update(html=result["html"], data=result["data"], created=time.time())
+        payload = safe_result(result)
+        status = 200 if result.get("email", {}).get("status") == "sent" else 503
+        return jsonify(payload), status
+    except Exception as exc:
+        app.logger.exception("Falha na execucao manual do relatorio")
+        return jsonify(status="failed", error_type=type(exc).__name__), 502
+
+
+@app.post("/internal/run")
+def internal_run():
+    if not internal_authorized():
+        return jsonify(status="unauthorized"), 401
+    try:
+        result = run_job(send_email=True)
+        _CACHE.update(html=result["html"], data=result["data"], created=time.time())
+        payload = safe_result(result)
+        app.logger.warning(
+            "REPORT_JOB email=%s projected=%s ignored=%s unknown_type=%s balance_source=%s",
+            result.get("email", {}).get("status"),
+            result.get("meta", {}).get("projected_rows"),
+            result.get("meta", {}).get("ignored_rows"),
+            result.get("meta", {}).get("unknown_type_rows"),
+            result.get("meta", {}).get("opening_balance_source"),
+        )
+        status = 200 if result.get("email", {}).get("status") == "sent" else 503
+        return jsonify(payload), status
+    except Exception as exc:
+        app.logger.exception("Falha no job automatico do relatorio")
+        return jsonify(status="failed", error_type=type(exc).__name__), 502
 
 
 if __name__ == "__main__":
