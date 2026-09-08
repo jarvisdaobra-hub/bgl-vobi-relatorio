@@ -50,12 +50,15 @@ def configured(*names):
     return any(bool(os.getenv(name, "").strip()) for name in names)
 
 
+def vobi_base_url():
+    return os.getenv("VOBI_API_BASE_URL", "https://api.vobi.com.br/v2").rstrip("/")
+
+
 def vobi_token():
     uuid = os.environ["VOBI_UUID"]
     secret = os.environ["VOBI_CLIENT_SECRET"]
-    base_url = os.getenv("VOBI_API_BASE_URL", "https://api.vobi.com.br/v2").rstrip("/")
     response = requests.post(
-        f"{base_url}/auth/token",
+        f"{vobi_base_url()}/auth/token",
         auth=(uuid, secret),
         timeout=20,
     )
@@ -67,6 +70,66 @@ def vobi_token():
     return token
 
 
+def vobi_get(path, token):
+    response = requests.get(
+        f"{vobi_base_url()}/{path.lstrip('/')}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=20,
+    )
+    return response
+
+
+def run_vobi_smoke_test():
+    result = {
+        "auth": "not_configured",
+        "financial_totals": None,
+        "daily_cash_flow": None,
+        "installments": None,
+    }
+
+    if not configured("VOBI_UUID") or not configured("VOBI_CLIENT_SECRET"):
+        app.logger.warning("VOBI_SMOKE auth=not_configured")
+        return result
+
+    try:
+        token = vobi_token()
+        result["auth"] = "authenticated"
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        result["auth"] = f"authentication_failed:{status}"
+        app.logger.warning("VOBI_SMOKE auth=%s", result["auth"])
+        return result
+    except Exception:
+        result["auth"] = "connection_failed"
+        app.logger.exception("VOBI_SMOKE auth=connection_failed")
+        return result
+
+    checks = {
+        "financial_totals": "financial/totals",
+        "daily_cash_flow": "financial/dailyCashFlow",
+        "installments": "financial/installments",
+    }
+    for key, path in checks.items():
+        try:
+            response = vobi_get(path, token)
+            result[key] = response.status_code
+        except Exception:
+            result[key] = "connection_failed"
+            app.logger.exception("VOBI_SMOKE endpoint=%s connection_failed", path)
+
+    app.logger.warning(
+        "VOBI_SMOKE auth=%s financial_totals=%s daily_cash_flow=%s installments=%s",
+        result["auth"],
+        result["financial_totals"],
+        result["daily_cash_flow"],
+        result["installments"],
+    )
+    return result
+
+
+VOBI_SMOKE = run_vobi_smoke_test()
+
+
 @app.get("/health")
 def health():
     return jsonify(
@@ -75,6 +138,7 @@ def health():
         report_loaded=report_html() is not None,
         vobi_uuid_configured=configured("VOBI_UUID"),
         vobi_secret_configured=configured("VOBI_CLIENT_SECRET"),
+        vobi_smoke=VOBI_SMOKE,
         email_configured=(
             configured("SMTP_HOST")
             and configured("SMTP_USER")
@@ -90,7 +154,7 @@ def vobi_status():
         return jsonify(status="not_configured"), 503
     try:
         vobi_token()
-        return jsonify(status="authenticated")
+        return jsonify(status="authenticated"), 200
     except requests.HTTPError as exc:
         return jsonify(status="authentication_failed", http_status=exc.response.status_code), 502
     except Exception:
