@@ -1,5 +1,4 @@
 import hmac
-import json
 import os
 import time
 from functools import wraps
@@ -52,11 +51,7 @@ def internal_authorized():
 def cached_report(force=False):
     ttl = max(0, int(os.getenv("REPORT_CACHE_SECONDS", "300")))
     now = time.time()
-    if (
-        not force
-        and _CACHE["html"] is not None
-        and now - _CACHE["created"] <= ttl
-    ):
+    if not force and _CACHE["html"] is not None and now - _CACHE["created"] <= ttl:
         return _CACHE["html"], _CACHE["data"]
 
     report_html, data = generate_report()
@@ -87,6 +82,23 @@ except Exception as exc:
     STARTUP_SMOKE = {"vobi": "failed", "error_type": type(exc).__name__}
     app.logger.exception("STARTUP_SMOKE failed")
 
+try:
+    startup_html, startup_data = generate_report()
+    _CACHE.update(html=startup_html, data=startup_data, created=time.time())
+    startup_meta = startup_data.get("meta", {})
+    REPORT_SMOKE = {
+        "status": "ok",
+        "projected_rows": startup_meta.get("projected_rows"),
+        "ignored_rows": startup_meta.get("ignored_rows"),
+        "unknown_type_rows": startup_meta.get("unknown_type_rows"),
+        "opening_balance_source": startup_meta.get("opening_balance_source"),
+        "lead_days_adjusted_rows": startup_meta.get("lead_days_adjusted_rows"),
+    }
+    app.logger.warning("REPORT_SMOKE %s", safe_log_summary(REPORT_SMOKE))
+except Exception as exc:
+    REPORT_SMOKE = {"status": "failed", "error_type": type(exc).__name__}
+    app.logger.exception("REPORT_SMOKE failed")
+
 
 @app.get("/health")
 def health():
@@ -98,6 +110,7 @@ def health():
         balance_endpoint=STARTUP_SMOKE.get("balance_endpoint"),
         email_configured=STARTUP_SMOKE.get("email_configured", False),
         job_token_configured=configured("JOB_TOKEN"),
+        report_smoke=REPORT_SMOKE,
         sample_key_count=len(STARTUP_SMOKE.get("sample_keys", [])),
     )
 
@@ -139,8 +152,8 @@ def manual_run():
         result = run_job(send_email=True)
         _CACHE.update(html=result["html"], data=result["data"], created=time.time())
         payload = safe_result(result)
-        status = 200 if result.get("email", {}).get("status") == "sent" else 503
-        return jsonify(payload), status
+        email_status = result.get("email", {}).get("status")
+        return jsonify(payload), 200 if email_status in {"sent", "not_configured"} else 503
     except Exception as exc:
         app.logger.exception("Falha na execucao manual do relatorio")
         return jsonify(status="failed", error_type=type(exc).__name__), 502
@@ -162,8 +175,8 @@ def internal_run():
             result.get("meta", {}).get("unknown_type_rows"),
             result.get("meta", {}).get("opening_balance_source"),
         )
-        status = 200 if result.get("email", {}).get("status") == "sent" else 503
-        return jsonify(payload), status
+        email_status = result.get("email", {}).get("status")
+        return jsonify(payload), 200 if email_status in {"sent", "not_configured"} else 503
     except Exception as exc:
         app.logger.exception("Falha no job automatico do relatorio")
         return jsonify(status="failed", error_type=type(exc).__name__), 502
