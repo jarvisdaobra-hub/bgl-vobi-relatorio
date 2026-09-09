@@ -1,6 +1,7 @@
 import hmac
 import os
 import time
+import unicodedata
 from datetime import datetime, timedelta
 from functools import wraps
 from zoneinfo import ZoneInfo
@@ -123,14 +124,19 @@ def unassigned_expense_breakdown():
     }
 
 
+def _fold(value):
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    return "".join(ch for ch in text if not unicodedata.combining(ch)).lower()
+
+
 def receivable_audit_breakdown():
     today = datetime.now(TZ).date()
-    start_date = today - timedelta(days=15)
-    end_date = today + timedelta(days=60)
     token = vobi_token()
-    rows, _ = fetch_installments(token, start_date, end_date)
-    incomes = []
-    sep7 = []
+    rows, _ = fetch_installments(token, today - timedelta(days=365), today + timedelta(days=120))
+    sep_window = []
+    sc_candidates = []
+    large_candidates = []
+    exact_sep7 = []
 
     for row in rows:
         item = normalize_installment(row, today)
@@ -153,22 +159,44 @@ def receivable_audit_breakdown():
             "ignored": item["ignored"],
             "overdue": item["overdue"],
         }
-        if item["bill_type"] == "income":
-            incomes.append(audit)
-        if raw_due == "2026-09-07":
-            sep7.append(audit)
 
-    incomes.sort(key=lambda row: (row["raw_due_date"] or "", -row["amount"]))
-    sep7.sort(key=lambda row: -row["amount"])
-    active = [row for row in incomes if not row["paid"] and not row["cancelled"] and not row["ignored"]]
+        if raw_due == "2026-09-07":
+            exact_sep7.append(audit)
+
+        if item["bill_type"] != "income":
+            continue
+
+        if "2026-09-01" <= raw_due <= "2026-09-12":
+            sep_window.append(audit)
+
+        haystack = _fold(" ".join([item["project"], item["counterparty"], item["description"]]))
+        if (
+            "2026-08-01" <= raw_due <= "2026-10-31"
+            and item["amount"] >= 10000
+            and any(term in haystack for term in ["blumenau", "sao jose", "eletrobras", "eletrosul", "axia", "cgtee"])
+        ):
+            sc_candidates.append(audit)
+
+        if (
+            "2026-08-01" <= raw_due <= "2026-10-31"
+            and item["amount"] >= 50000
+            and not item["cancelled"]
+        ):
+            large_candidates.append(audit)
+
+    for collection in (sep_window, sc_candidates, large_candidates, exact_sep7):
+        collection.sort(key=lambda row: (row["raw_due_date"] or "", -row["amount"]))
+
     return {
         "generated_at": datetime.now(TZ).isoformat(),
-        "income_count": len(incomes),
-        "active_income_count": len(active),
-        "active_income_total": sum(row["amount"] for row in active),
-        "income_items": incomes[:40],
-        "sep7_count": len(sep7),
-        "sep7_items": sep7,
+        "sep_window_count": len(sep_window),
+        "sep_window": sep_window[:50],
+        "exact_sep7_count": len(exact_sep7),
+        "exact_sep7": exact_sep7[:20],
+        "sc_candidate_count": len(sc_candidates),
+        "sc_candidates": sc_candidates[:40],
+        "large_candidate_count": len(large_candidates),
+        "large_candidates": large_candidates[:40],
     }
 
 
