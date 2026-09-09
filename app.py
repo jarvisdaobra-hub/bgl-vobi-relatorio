@@ -123,6 +123,55 @@ def unassigned_expense_breakdown():
     }
 
 
+def receivable_audit_breakdown():
+    today = datetime.now(TZ).date()
+    start_date = today - timedelta(days=15)
+    end_date = today + timedelta(days=60)
+    token = vobi_token()
+    rows, _ = fetch_installments(token, start_date, end_date)
+    incomes = []
+    sep7 = []
+
+    for row in rows:
+        item = normalize_installment(row, today)
+        raw_due = str(row.get("dueDate") or "")[:10]
+        raw_payment = row.get("payment") if isinstance(row.get("payment"), dict) else {}
+        raw_bill_type = row.get("billType") or raw_payment.get("billType")
+        audit = {
+            "id": item["id"],
+            "raw_due_date": raw_due,
+            "effective_date": item["effective_date"].isoformat() if item["effective_date"] else None,
+            "status": item["status"],
+            "bill_type": item["bill_type"],
+            "raw_bill_type": raw_bill_type,
+            "project": item["project"],
+            "counterparty": item["counterparty"],
+            "description": item["description"],
+            "amount": item["amount"],
+            "paid": item["paid"],
+            "cancelled": item["cancelled"],
+            "ignored": item["ignored"],
+            "overdue": item["overdue"],
+        }
+        if item["bill_type"] == "income":
+            incomes.append(audit)
+        if raw_due == "2026-09-07":
+            sep7.append(audit)
+
+    incomes.sort(key=lambda row: (row["raw_due_date"] or "", -row["amount"]))
+    sep7.sort(key=lambda row: -row["amount"])
+    active = [row for row in incomes if not row["paid"] and not row["cancelled"] and not row["ignored"]]
+    return {
+        "generated_at": datetime.now(TZ).isoformat(),
+        "income_count": len(incomes),
+        "active_income_count": len(active),
+        "active_income_total": sum(row["amount"] for row in active),
+        "income_items": incomes[:40],
+        "sep7_count": len(sep7),
+        "sep7_items": sep7,
+    }
+
+
 try:
     STARTUP_SMOKE = startup_smoke()
     app.logger.warning("STARTUP_SMOKE %s", safe_log_summary(STARTUP_SMOKE))
@@ -177,6 +226,13 @@ try:
 except Exception as exc:
     UNASSIGNED_SMOKE = {"status": "failed", "error_type": type(exc).__name__}
     app.logger.exception("UNASSIGNED_SMOKE failed")
+
+try:
+    RECEIVABLE_SMOKE = receivable_audit_breakdown()
+    app.logger.warning("RECEIVABLE_SMOKE %s", safe_log_summary(RECEIVABLE_SMOKE))
+except Exception as exc:
+    RECEIVABLE_SMOKE = {"status": "failed", "error_type": type(exc).__name__}
+    app.logger.exception("RECEIVABLE_SMOKE failed")
 
 
 @app.get("/health")
