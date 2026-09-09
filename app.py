@@ -1,15 +1,26 @@
 import hmac
 import os
 import time
+from datetime import datetime, timedelta
 from functools import wraps
+from zoneinfo import ZoneInfo
 
 from flask import Flask, Response, jsonify, request
 
-from reporting import generate_report, run_job, safe_log_summary, startup_smoke
+from reporting import (
+    fetch_installments,
+    generate_report,
+    normalize_installment,
+    run_job,
+    safe_log_summary,
+    startup_smoke,
+    vobi_token,
+)
 
 
 app = Flask(__name__)
 _CACHE = {"html": None, "data": None, "created": 0.0}
+TZ = ZoneInfo(os.getenv("REPORT_TIMEZONE", "America/Sao_Paulo"))
 
 
 def configured(name):
@@ -75,6 +86,43 @@ def safe_result(result):
     }
 
 
+def unassigned_expense_breakdown():
+    today = datetime.now(TZ).date()
+    end_date = today + timedelta(days=60)
+    token = vobi_token()
+    rows, _ = fetch_installments(token, today - timedelta(days=365), end_date)
+    items = []
+
+    for row in rows:
+        item = normalize_installment(row, today)
+        if item["paid"] or item["cancelled"] or item["ignored"]:
+            continue
+        if item["bill_type"] != "expense" or not item["effective_date"]:
+            continue
+        if item["effective_date"] > end_date:
+            continue
+        if item["project"] != "Sem obra/projeto":
+            continue
+        items.append(
+            {
+                "id": item["id"],
+                "date": item["effective_date"].isoformat(),
+                "counterparty": item["counterparty"],
+                "description": item["description"],
+                "amount": item["amount"],
+                "overdue": item["overdue"],
+            }
+        )
+
+    items.sort(key=lambda row: row["amount"], reverse=True)
+    return {
+        "generated_at": datetime.now(TZ).isoformat(),
+        "count": len(items),
+        "total": sum(row["amount"] for row in items),
+        "items": items,
+    }
+
+
 try:
     STARTUP_SMOKE = startup_smoke()
     app.logger.warning("STARTUP_SMOKE %s", safe_log_summary(STARTUP_SMOKE))
@@ -122,6 +170,13 @@ try:
 except Exception as exc:
     REPORT_SMOKE = {"status": "failed", "error_type": type(exc).__name__}
     app.logger.exception("REPORT_SMOKE failed")
+
+try:
+    UNASSIGNED_SMOKE = unassigned_expense_breakdown()
+    app.logger.warning("UNASSIGNED_SMOKE %s", safe_log_summary(UNASSIGNED_SMOKE))
+except Exception as exc:
+    UNASSIGNED_SMOKE = {"status": "failed", "error_type": type(exc).__name__}
+    app.logger.exception("UNASSIGNED_SMOKE failed")
 
 
 @app.get("/health")
