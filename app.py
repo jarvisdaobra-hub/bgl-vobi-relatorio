@@ -89,14 +89,7 @@ def daily_cashflow_audit():
     now = datetime.now(TZ)
     today = now.date()
     token = vobi_token()
-    payload = vobi_get(
-        "financial/dailyCashFlow",
-        token,
-        params={
-            "where[initialDate]": (today - timedelta(days=10)).isoformat(),
-            "where[endDate]": (today + timedelta(days=120)).isoformat(),
-        },
-    )
+    payload = vobi_get("financial/dailyCashFlow", token)
     rows = _daily_rows(payload)
     selected = []
     for row in rows:
