@@ -203,6 +203,8 @@ def build_controller_snapshot():
     missing_project = [e for e in events_45 if e["project"] == "Sem obra/projeto"]
     financial_items = [e for e in events_45 if _flow_class(e) == "financeiro"]
     sep16_items = [e for e in events_45 if e.get("due_date") and e["due_date"].isoformat() == "2026-09-16"]
+    blumenau_items = [e for e in events_45 if "blumenau" in _normalized(e.get("project"))]
+    sao_jose_items = [e for e in events_45 if "sao jose" in _normalized(e.get("project"))]
 
     duplicate_groups = defaultdict(list)
     for e in events:
@@ -252,6 +254,8 @@ def build_controller_snapshot():
         "flow_45d": _flow_breakdown(events_45),
         "financial_items_45d": [_event_view(e) for e in sorted(financial_items, key=lambda x: (x["effective_date"], -x["amount"]))],
         "sep16_items": [_event_view(e) for e in sorted(sep16_items, key=lambda x: -x["amount"])],
+        "blumenau_items_45d": [_event_view(e) for e in sorted(blumenau_items, key=lambda x: (x["effective_date"], x["bill_type"], -x["amount"]))],
+        "sao_jose_items_45d": [_event_view(e) for e in sorted(sao_jose_items, key=lambda x: (x["effective_date"], x["bill_type"], -x["amount"]))],
         "overdue": {
             "income_count": len(overdue_income),
             "income_value": _money_sum(overdue_income, "income"),
