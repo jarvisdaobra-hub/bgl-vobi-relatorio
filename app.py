@@ -6,6 +6,7 @@ from functools import wraps
 from flask import Flask, Response, jsonify, request
 
 from controller import build_controller_snapshot
+from sc_audit import build_sc_audit
 from reporting import generate_report, run_job, safe_log_summary, startup_smoke
 
 app = Flask(__name__)
@@ -95,6 +96,13 @@ try:
 except Exception as exc:
     CONTROLLER_SNAPSHOT = {"status": "failed", "error_type": type(exc).__name__}
     app.logger.exception("CONTROLLER_SNAPSHOT failed")
+
+try:
+    SC_AUDIT = build_sc_audit()
+    app.logger.warning("SC_AUDIT %s", safe_log_summary(SC_AUDIT))
+except Exception as exc:
+    SC_AUDIT = {"status": "failed", "error_type": type(exc).__name__}
+    app.logger.exception("SC_AUDIT failed")
 
 
 @app.get("/health")
