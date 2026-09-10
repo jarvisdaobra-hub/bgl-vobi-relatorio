@@ -4,8 +4,8 @@ from datetime import datetime, timedelta
 
 from reporting import (
     TZ,
-    _add_months,
     _daily_projection,
+    _normalized,
     _parse_date,
     fetch_installments,
     fetch_opening_balance,
@@ -64,7 +64,7 @@ def _aging(today, events):
     return buckets
 
 
-def _project_summary(events, days=60):
+def _project_summary(events):
     by_project = defaultdict(lambda: {"income": 0.0, "expense": 0.0, "is_sc": False})
     for e in events:
         p = by_project[e["project"]]
@@ -84,10 +84,49 @@ def _project_summary(events, days=60):
     return consuming, generating
 
 
+def _flow_class(event):
+    project = _normalized(event.get("project"))
+    description = _normalized(event.get("description"))
+    counterparty = _normalized(event.get("counterparty"))
+    text = f"{project} {description} {counterparty}"
+
+    financial_terms = (
+        "sicoob",
+        "antecip",
+        "emprestimo",
+        "financiamento",
+        "parcelamento",
+        "cartao de credito",
+        "iof",
+        "juros",
+        "tarifa bancaria",
+        "capital de giro",
+    )
+    if any(term in text for term in financial_terms):
+        return "financeiro"
+    if "administrativo" in project or "centro de custo - administrativo" in project:
+        return "administrativo"
+    return "operacional"
+
+
+def _flow_breakdown(events):
+    buckets = {
+        "operacional": {"income": 0.0, "expense": 0.0},
+        "administrativo": {"income": 0.0, "expense": 0.0},
+        "financeiro": {"income": 0.0, "expense": 0.0},
+    }
+    for e in events:
+        bucket = buckets[_flow_class(e)]
+        bucket[e["bill_type"]] += e["amount"]
+    for bucket in buckets.values():
+        bucket["net"] = bucket["income"] - bucket["expense"]
+    return buckets
+
+
 def build_controller_snapshot():
     now = datetime.now(TZ)
     today = now.date()
-    horizon_end = _add_months(today, 12) - timedelta(days=1)
+    horizon_end = today + timedelta(days=45)
     token = vobi_token()
     rows, api_count = fetch_installments(token, today - timedelta(days=365), horizon_end)
     opening_balance, balance_source = fetch_opening_balance(token)
@@ -119,7 +158,7 @@ def build_controller_snapshot():
         if item["effective_date"] <= horizon_end:
             events.append(item)
 
-    windows = {str(days): _window(today, days, events, opening_balance) for days in (7, 15, 30, 60, 90, 180, 365)}
+    windows = {str(days): _window(today, days, events, opening_balance) for days in (7, 15, 30, 45)}
     minimum_balance, minimum_date, final_balance = _daily_projection(today, horizon_end, events, opening_balance)
 
     overdue_income = [e for e in events if e["overdue"] and e["bill_type"] == "income"]
@@ -146,11 +185,9 @@ def build_controller_snapshot():
     outside = [x for x in discipline if not x["within_rule"]]
     inside = [x for x in discipline if x["within_rule"]]
 
-    current_60_end = today + timedelta(days=60)
-    events_60 = [e for e in events if today <= e["effective_date"] <= current_60_end]
-    consuming, generating = _project_summary(events_60)
-
-    missing_project = [e for e in events_60 if e["project"] == "Sem obra/projeto"]
+    events_45 = [e for e in events if today <= e["effective_date"] <= horizon_end]
+    consuming, generating = _project_summary(events_45)
+    missing_project = [e for e in events_45 if e["project"] == "Sem obra/projeto"]
 
     duplicate_groups = defaultdict(list)
     for e in events:
@@ -191,12 +228,13 @@ def build_controller_snapshot():
         "paid_rows": paid,
         "cancelled_rows": cancelled,
         "windows": windows,
-        "overall": {
+        "overall_45d": {
             "minimum_balance": minimum_balance,
             "minimum_balance_date": minimum_date.isoformat(),
             "required_cash": max(0.0, -minimum_balance),
-            "final_balance_12m": final_balance,
+            "final_balance_45d": final_balance,
         },
+        "flow_45d": _flow_breakdown(events_45),
         "overdue": {
             "income_count": len(overdue_income),
             "income_value": _money_sum(overdue_income, "income"),
@@ -214,7 +252,7 @@ def build_controller_snapshot():
             "outside_value": sum(x["amount"] for x in outside),
             "largest_deviations": sorted(outside, key=lambda x: x["amount"], reverse=True)[:10],
         },
-        "projects_60d": {
+        "projects_45d": {
             "top_consuming": consuming,
             "top_generating": generating,
             "without_project_count": len(missing_project),
@@ -228,10 +266,12 @@ def build_controller_snapshot():
                 "supplier": e["counterparty"],
                 "description": e["description"],
                 "amount": e["amount"],
+                "flow_class": _flow_class(e),
             }
             for e in top_expenses_30
         ],
         "not_available_from_current_vobi_snapshot": [
+            "bank statement balance for independent reconciliation against VOBI currentBalance",
             "commitments not yet entered in VOBI",
             "cost to complete by project",
             "original/current/final projected margin by project",
