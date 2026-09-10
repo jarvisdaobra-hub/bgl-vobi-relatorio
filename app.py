@@ -1,24 +1,15 @@
 import hmac
 import os
 import time
-from datetime import datetime, timedelta
 from functools import wraps
-from zoneinfo import ZoneInfo
 
 from flask import Flask, Response, jsonify, request
 
-from reporting import (
-    generate_report,
-    run_job,
-    safe_log_summary,
-    startup_smoke,
-    vobi_get,
-    vobi_token,
-)
+from controller import build_controller_snapshot
+from reporting import generate_report, run_job, safe_log_summary, startup_smoke
 
 app = Flask(__name__)
 _CACHE = {"html": None, "data": None, "created": 0.0}
-TZ = ZoneInfo(os.getenv("REPORT_TIMEZONE", "America/Sao_Paulo"))
 
 
 def configured(name):
@@ -74,45 +65,6 @@ def safe_result(result):
     }
 
 
-def _daily_rows(payload):
-    if isinstance(payload, list):
-        return payload
-    if isinstance(payload, dict):
-        for key in ("rows", "data", "items", "dailyCashFlow"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                return value
-    return []
-
-
-def daily_cashflow_audit():
-    now = datetime.now(TZ)
-    today = now.date()
-    token = vobi_token()
-    payload = vobi_get("financial/dailyCashFlow", token)
-    rows = _daily_rows(payload)
-    selected = []
-    for row in rows:
-        day = str(row.get("date") or "")[:10] if isinstance(row, dict) else ""
-        if not day:
-            continue
-        if (today - timedelta(days=10)).isoformat() <= day <= (today + timedelta(days=120)).isoformat():
-            selected.append({
-                "date": day,
-                "income": row.get("income"),
-                "expense": row.get("expense"),
-                "transfer": row.get("transfer"),
-                "balance": row.get("balance"),
-            })
-    selected.sort(key=lambda x: x["date"])
-    return {
-        "generated_at": now.isoformat(),
-        "rows_received": len(rows),
-        "selected_count": len(selected),
-        "selected": selected,
-    }
-
-
 try:
     STARTUP_SMOKE = startup_smoke()
     app.logger.warning("STARTUP_SMOKE %s", safe_log_summary(STARTUP_SMOKE))
@@ -124,10 +76,6 @@ try:
     startup_html, startup_data = generate_report()
     _CACHE.update(html=startup_html, data=startup_data, created=time.time())
     startup_meta = startup_data.get("meta", {})
-    top_projects = [
-        {"name": row.get("name"), "income": row.get("income"), "expense": row.get("expense"), "net": row.get("net"), "region": row.get("region")}
-        for row in startup_data.get("projects", [])[:5]
-    ]
     REPORT_SMOKE = {
         "status": "ok",
         "generated_at": startup_meta.get("generated_at"),
@@ -135,19 +83,6 @@ try:
         "ignored_rows": startup_meta.get("ignored_rows"),
         "unknown_type_rows": startup_meta.get("unknown_type_rows"),
         "opening_balance_source": startup_meta.get("opening_balance_source"),
-        "opening_balance": startup_meta.get("opening_balance"),
-        "minimum_balance": startup_meta.get("minimum_balance"),
-        "minimum_balance_date": startup_meta.get("minimum_balance_date"),
-        "required_cash": startup_meta.get("required_cash"),
-        "final_balance_12m": startup_meta.get("final_balance_12m"),
-        "income_30": startup_meta.get("income_30"),
-        "expense_30": startup_meta.get("expense_30"),
-        "overdue_income": startup_meta.get("overdue_income"),
-        "overdue_expense": startup_meta.get("overdue_expense"),
-        "overdue_income_count": startup_meta.get("overdue_income_count"),
-        "overdue_expense_count": startup_meta.get("overdue_expense_count"),
-        "regions": startup_data.get("regions", {}),
-        "top_projects": top_projects,
     }
     app.logger.warning("REPORT_SMOKE %s", safe_log_summary(REPORT_SMOKE))
 except Exception as exc:
@@ -155,11 +90,11 @@ except Exception as exc:
     app.logger.exception("REPORT_SMOKE failed")
 
 try:
-    DAILY_CASHFLOW_SMOKE = daily_cashflow_audit()
-    app.logger.warning("DAILY_CASHFLOW_SMOKE %s", safe_log_summary(DAILY_CASHFLOW_SMOKE))
+    CONTROLLER_SNAPSHOT = build_controller_snapshot()
+    app.logger.warning("CONTROLLER_SNAPSHOT %s", safe_log_summary(CONTROLLER_SNAPSHOT))
 except Exception as exc:
-    DAILY_CASHFLOW_SMOKE = {"status": "failed", "error_type": type(exc).__name__}
-    app.logger.exception("DAILY_CASHFLOW_SMOKE failed")
+    CONTROLLER_SNAPSHOT = {"status": "failed", "error_type": type(exc).__name__}
+    app.logger.exception("CONTROLLER_SNAPSHOT failed")
 
 
 @app.get("/health")
@@ -172,8 +107,10 @@ def health():
         balance_endpoint=STARTUP_SMOKE.get("balance_endpoint"),
         email_configured=STARTUP_SMOKE.get("email_configured", False),
         job_token_configured=configured("JOB_TOKEN"),
-        report_smoke=REPORT_SMOKE,
-        daily_cashflow_smoke=DAILY_CASHFLOW_SMOKE,
+        report_status=REPORT_SMOKE.get("status"),
+        report_generated_at=REPORT_SMOKE.get("generated_at"),
+        controller_status=CONTROLLER_SNAPSHOT.get("status"),
+        controller_generated_at=CONTROLLER_SNAPSHOT.get("generated_at"),
         sample_key_count=len(STARTUP_SMOKE.get("sample_keys", [])),
     )
 
