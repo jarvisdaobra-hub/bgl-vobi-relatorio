@@ -65,6 +65,58 @@ def safe_result(result):
     }
 
 
+def personnel_advances_to_sep30(snapshot):
+    if not isinstance(snapshot, dict):
+        return {"total": 0.0, "by_project": {}, "items": []}
+
+    sources = [
+        (snapshot.get("blumenau_items_45d", []), False),
+        (snapshot.get("sao_jose_items_45d", []), False),
+        (snapshot.get("excluded_items_45d", []), True),
+    ]
+    terms = ("vale", "adiant", "ajuda de custo", "adiantamento salarial")
+    matches = []
+    seen = set()
+
+    for items, excluded in sources:
+        for item in items or []:
+            if item.get("bill_type") != "expense":
+                continue
+            due = str(item.get("due_date") or "")
+            if not due or due > "2026-09-30":
+                continue
+            project = str(item.get("project") or "")
+            project_norm = project.casefold()
+            if "blumenau" not in project_norm and "são josé" not in project_norm and "sao jose" not in project_norm:
+                continue
+            text = f"{item.get('description') or ''} {item.get('counterparty') or ''}".casefold()
+            if not any(term in text for term in terms):
+                continue
+            key = (due, project, item.get("counterparty"), item.get("description"), round(float(item.get("amount") or 0), 2))
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append({
+                "due_date": due,
+                "project": project,
+                "counterparty": item.get("counterparty"),
+                "description": item.get("description"),
+                "amount": float(item.get("amount") or 0),
+                "excluded_by_legacy_rule": excluded,
+            })
+
+    by_project = {}
+    for item in matches:
+        name = item["project"]
+        by_project[name] = by_project.get(name, 0.0) + item["amount"]
+
+    return {
+        "total": sum(item["amount"] for item in matches),
+        "by_project": by_project,
+        "items": sorted(matches, key=lambda x: (x["due_date"], x["project"], -x["amount"])),
+    }
+
+
 def controller_log_summary(snapshot):
     overall = snapshot.get("overall_45d", {}) if isinstance(snapshot, dict) else {}
     windows = snapshot.get("windows", {}) if isinstance(snapshot, dict) else {}
@@ -77,6 +129,7 @@ def controller_log_summary(snapshot):
         "projected_rows": snapshot.get("projected_rows"),
         "ignored_rows": snapshot.get("ignored_rows"),
         "ignored_value_45d": snapshot.get("ignored_value_45d"),
+        "personnel_advances_to_sep30": personnel_advances_to_sep30(snapshot),
         "windows": {
             key: {
                 "income": value.get("income"),
