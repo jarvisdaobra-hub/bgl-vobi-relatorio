@@ -123,6 +123,19 @@ def _flow_breakdown(events):
     return buckets
 
 
+def _event_view(e):
+    return {
+        "date": e["effective_date"].isoformat() if e.get("effective_date") else None,
+        "due_date": e["due_date"].isoformat() if e.get("due_date") else None,
+        "bill_type": e["bill_type"],
+        "project": e["project"],
+        "counterparty": e["counterparty"],
+        "description": e["description"],
+        "amount": e["amount"],
+        "flow_class": _flow_class(e),
+    }
+
+
 def build_controller_snapshot():
     now = datetime.now(TZ)
     today = now.date()
@@ -188,6 +201,7 @@ def build_controller_snapshot():
     events_45 = [e for e in events if today <= e["effective_date"] <= horizon_end]
     consuming, generating = _project_summary(events_45)
     missing_project = [e for e in events_45 if e["project"] == "Sem obra/projeto"]
+    financial_items = [e for e in events_45 if _flow_class(e) == "financeiro"]
 
     duplicate_groups = defaultdict(list)
     for e in events:
@@ -235,6 +249,7 @@ def build_controller_snapshot():
             "final_balance_45d": final_balance,
         },
         "flow_45d": _flow_breakdown(events_45),
+        "financial_items_45d": [_event_view(e) for e in sorted(financial_items, key=lambda x: (x["effective_date"], -x["amount"]))],
         "overdue": {
             "income_count": len(overdue_income),
             "income_value": _money_sum(overdue_income, "income"),
