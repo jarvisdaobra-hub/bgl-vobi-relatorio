@@ -6,7 +6,6 @@ from functools import wraps
 from flask import Flask, Response, jsonify, request
 
 from controller import build_controller_snapshot
-from sc_audit import build_sc_audit
 from reporting import generate_report, run_job, safe_log_summary, startup_smoke
 
 app = Flask(__name__)
@@ -66,6 +65,38 @@ def safe_result(result):
     }
 
 
+def controller_log_summary(snapshot):
+    overall = snapshot.get("overall_45d", {}) if isinstance(snapshot, dict) else {}
+    windows = snapshot.get("windows", {}) if isinstance(snapshot, dict) else {}
+    return {
+        "status": snapshot.get("status"),
+        "generated_at": snapshot.get("generated_at"),
+        "source": snapshot.get("source"),
+        "api_count": snapshot.get("api_count"),
+        "fetched_open_rows": snapshot.get("fetched_open_rows"),
+        "projected_rows": snapshot.get("projected_rows"),
+        "ignored_rows": snapshot.get("ignored_rows"),
+        "ignored_value_45d": snapshot.get("ignored_value_45d"),
+        "windows": {
+            key: {
+                "income": value.get("income"),
+                "expense": value.get("expense"),
+                "net": value.get("net"),
+                "closing_balance": value.get("closing_balance"),
+                "minimum_balance": value.get("minimum_balance"),
+                "minimum_balance_date": value.get("minimum_balance_date"),
+            }
+            for key, value in windows.items()
+        },
+        "overall_45d": {
+            "minimum_balance": overall.get("minimum_balance"),
+            "minimum_balance_date": overall.get("minimum_balance_date"),
+            "required_cash": overall.get("required_cash"),
+            "final_balance_45d": overall.get("final_balance_45d"),
+        },
+    }
+
+
 try:
     STARTUP_SMOKE = startup_smoke()
     app.logger.warning("STARTUP_SMOKE %s", safe_log_summary(STARTUP_SMOKE))
@@ -92,17 +123,10 @@ except Exception as exc:
 
 try:
     CONTROLLER_SNAPSHOT = build_controller_snapshot()
-    app.logger.warning("CONTROLLER_SNAPSHOT %s", safe_log_summary(CONTROLLER_SNAPSHOT))
+    app.logger.warning("CONTROLLER_SNAPSHOT %s", safe_log_summary(controller_log_summary(CONTROLLER_SNAPSHOT)))
 except Exception as exc:
     CONTROLLER_SNAPSHOT = {"status": "failed", "error_type": type(exc).__name__}
     app.logger.exception("CONTROLLER_SNAPSHOT failed")
-
-try:
-    SC_AUDIT = build_sc_audit()
-    app.logger.warning("SC_AUDIT %s", safe_log_summary(SC_AUDIT))
-except Exception as exc:
-    SC_AUDIT = {"status": "failed", "error_type": type(exc).__name__}
-    app.logger.exception("SC_AUDIT failed")
 
 
 @app.get("/health")
@@ -119,8 +143,21 @@ def health():
         report_generated_at=REPORT_SMOKE.get("generated_at"),
         controller_status=CONTROLLER_SNAPSHOT.get("status"),
         controller_generated_at=CONTROLLER_SNAPSHOT.get("generated_at"),
+        controller_source=CONTROLLER_SNAPSHOT.get("source"),
+        controller_open_rows=CONTROLLER_SNAPSHOT.get("fetched_open_rows"),
         sample_key_count=len(STARTUP_SMOKE.get("sample_keys", [])),
     )
+
+
+@app.get("/controller/status")
+@require_auth
+def controller_status():
+    try:
+        snapshot = build_controller_snapshot()
+        return jsonify(controller_log_summary(snapshot))
+    except Exception:
+        app.logger.exception("Falha no status do controller")
+        return jsonify(status="failed"), 502
 
 
 @app.get("/")
