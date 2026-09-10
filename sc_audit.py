@@ -3,74 +3,82 @@ from datetime import datetime
 from reporting import TZ, _normalized, vobi_get, vobi_token
 
 
-def _project_id(row):
-    meta = row.get("_meta") if isinstance(row, dict) else None
-    refurbishes = meta.get("refurbishes") if isinstance(meta, dict) else None
-    ids = refurbishes.get("id") if isinstance(refurbishes, dict) else None
-    if isinstance(ids, list) and ids:
-        return ids[0]
-    return None
+def _summarize_payload(payload):
+    if isinstance(payload, dict):
+        rows = None
+        row_key = None
+        for key in ("rows", "data", "items", "refurbishes", "projects"):
+            if isinstance(payload.get(key), list):
+                rows = payload.get(key)
+                row_key = key
+                break
+        if rows is not None:
+            sample = []
+            for row in rows[:20]:
+                if isinstance(row, dict):
+                    sample.append({k: row.get(k) for k in row.keys() if str(k).lower() in {"id", "name", "title", "refurbishname", "projectname", "status", "deletedat"}})
+                else:
+                    sample.append(str(row)[:120])
+            return {"kind": "dict_list", "row_key": row_key, "count": payload.get("count"), "rows": len(rows), "sample": sample, "top_keys": sorted(payload.keys())}
+        return {"kind": "dict", "top_keys": sorted(payload.keys()), "sample": {k: payload.get(k) for k in list(payload.keys())[:20]}}
+    if isinstance(payload, list):
+        sample = []
+        for row in payload[:20]:
+            if isinstance(row, dict):
+                sample.append({k: row.get(k) for k in row.keys() if str(k).lower() in {"id", "name", "title", "refurbishname", "projectname", "status", "deletedat"}})
+            else:
+                sample.append(str(row)[:120])
+        return {"kind": "list", "rows": len(payload), "sample": sample}
+    return {"kind": type(payload).__name__, "sample": str(payload)[:300]}
 
 
-def _scan_project_names(token):
-    found = []
-    seen = set()
-    limit = 500
-    for offset in range(0, 10000, limit):
-        payload = vobi_get("financial/installments", token, params={"limit": limit, "offset": offset})
-        rows = payload.get("rows", []) if isinstance(payload, dict) else []
-        for row in rows:
-            project = str(row.get("refurbishName") or "").strip()
-            pnorm = _normalized(project)
-            if any(term in pnorm for term in ("blumenau", "sao jose", "eletrobras", "eletrobras")):
-                key = (project, _project_id(row))
-                if key not in seen:
-                    seen.add(key)
-                    found.append({"project": project, "project_id": _project_id(row), "offset_page": offset})
-        if len(rows) < limit:
-            break
-    return found
-
-
-def _probe_id_filters(token, project_id):
-    variants = {
-        "idRefurbish": {"idRefurbish": project_id},
-        "refurbishId": {"refurbishId": project_id},
-        "projectId": {"projectId": project_id},
-        "idProject": {"idProject": project_id},
-        "where_idRefurbish": {"where[idRefurbish]": project_id},
-        "where_refurbishId": {"where[refurbishId]": project_id},
-        "where_projectId": {"where[projectId]": project_id},
-        "where_refurbishes_id": {"where[refurbishes.id]": project_id},
-        "refurbishes_id": {"refurbishes[id]": project_id},
-        "idRefurbishes": {"idRefurbishes": project_id},
-        "where_idRefurbishes": {"where[idRefurbishes]": project_id},
-    }
-    results = {}
-    for name, extra in variants.items():
+def _probe_endpoints(token):
+    paths = [
+        "refurbishes",
+        "refurbish",
+        "projects",
+        "project",
+        "company/refurbishes",
+        "companies/refurbishes",
+        "refurbishes/360172",
+        "projects/360172",
+    ]
+    out = {}
+    for path in paths:
         try:
-            payload = vobi_get("financial/installments", token, params={"limit": 100, "offset": 0, **extra})
-            rows = payload.get("rows", []) if isinstance(payload, dict) else []
-            projects = sorted({str(r.get("refurbishName") or "") for r in rows if r.get("refurbishName")})
-            ids = sorted({x for x in (_project_id(r) for r in rows) if x is not None})
-            results[name] = {
-                "count": payload.get("count") if isinstance(payload, dict) else None,
-                "rows": len(rows),
-                "projects": projects[:10],
-                "project_ids": ids[:10],
-                "matching_rows": sum(1 for r in rows if _project_id(r) == project_id),
-            }
+            out[path] = _summarize_payload(vobi_get(path, token, params={"limit": 500, "offset": 0}))
         except Exception as exc:
-            results[name] = {"error": type(exc).__name__}
-    return results
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            out[path] = {"error": type(exc).__name__, "status": status}
+    return out
+
+
+def _fetch_project_installments(token, project_id):
+    rows = []
+    limit = 500
+    offset = 0
+    while True:
+        payload = vobi_get("financial/installments", token, params={"limit": limit, "offset": offset, "where[idRefurbish]": project_id})
+        batch = payload.get("rows", []) if isinstance(payload, dict) else []
+        rows.extend(batch)
+        if not batch or len(batch) < limit:
+            break
+        offset += len(batch)
+        if offset >= 10000:
+            break
+    return {
+        "project_id": project_id,
+        "reported_count": payload.get("count") if isinstance(payload, dict) else None,
+        "fetched_rows": len(rows),
+        "project_names": sorted({str(r.get("refurbishName") or "") for r in rows if r.get("refurbishName")}),
+    }
 
 
 def build_sc_audit():
     now = datetime.now(TZ)
     token = vobi_token()
-    blumenau_id = 360172
     return {
         "generated_at": now.isoformat(),
-        "project_names": _scan_project_names(token),
-        "blumenau_id_filter_probe": _probe_id_filters(token, blumenau_id),
+        "endpoint_probe": _probe_endpoints(token),
+        "blumenau_filter_validation": _fetch_project_installments(token, 360172),
     }
