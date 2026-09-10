@@ -17,11 +17,10 @@ def _view(item):
 
 
 def _fetch_beyond_count(token, initial_date, end_date):
-    limit = 1000
+    limit = 500
     offset = 0
     rows = []
     reported_count = None
-    # Do not stop at payload.count because VOBI appears to cap it at 10,000.
     while len(rows) < 50000:
         payload = vobi_get(
             "financial/installments",
