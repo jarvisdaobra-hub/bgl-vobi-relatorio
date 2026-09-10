@@ -21,7 +21,8 @@ def build_sc_audit():
     today = now.date()
     end = datetime(2026, 9, 30).date()
     token = vobi_token()
-    rows, _ = fetch_installments(token, today - __import__("datetime").timedelta(days=365), end)
+    # Query only the target window so the VOBI 10k result cap cannot hide current entries.
+    rows, api_count = fetch_installments(token, today, end)
     items = [normalize_installment(row, today) for row in rows]
 
     open_expenses = [
@@ -44,7 +45,7 @@ def build_sc_audit():
     broad = [
         i for i in open_expenses
         if i.get("is_sc") or any(k in text(i) for k in (
-            "blumenau", "sao jose", "são josé", "eletrobras", "eletrobras", "axia", "valmor", "4600001441", "4600002183"
+            "blumenau", "sao jose", "são josé", "eletrobras", "axia", "valmor", "4600001441", "4600002183"
         ))
     ]
 
@@ -59,7 +60,10 @@ def build_sc_audit():
 
     return {
         "generated_at": now.isoformat(),
+        "period_start": today.isoformat(),
         "period_end": end.isoformat(),
+        "api_count": api_count,
+        "open_expense_count": len(open_expenses),
         "blumenau_total": sum(float(i.get("amount") or 0) for i in blumenau),
         "sao_jose_total": sum(float(i.get("amount") or 0) for i in sao_jose),
         "unmatched_sc_related_total": sum(float(i.get("amount") or 0) for i in unmatched),
