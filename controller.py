@@ -7,11 +7,53 @@ from reporting import (
     _daily_projection,
     _normalized,
     _parse_date,
-    fetch_installments,
     fetch_opening_balance,
     normalize_installment,
+    vobi_get,
     vobi_token,
 )
+
+
+def _fetch_open_installments(token):
+    """Fetch all open VOBI installments.
+
+    VOBI's unfiltered financial/installments endpoint caps count/offset at 10,000
+    and ignores the date filters previously used by this integration. The
+    idInstallmentStatus filter is honored and keeps the result set below that
+    cap. Status 1 is the open/pending status observed in VOBI.
+    """
+    limit = 500
+    offset = 0
+    rows = []
+    api_count = None
+
+    while True:
+        payload = vobi_get(
+            "financial/installments",
+            token,
+            params={
+                "limit": limit,
+                "offset": offset,
+                "where[idInstallmentStatus]": 1,
+            },
+        )
+        batch = payload.get("rows", []) if isinstance(payload, dict) else []
+        if api_count is None and isinstance(payload, dict):
+            try:
+                api_count = int(payload.get("count"))
+            except (TypeError, ValueError):
+                api_count = None
+        rows.extend(batch)
+
+        if not batch or len(batch) < limit:
+            break
+        if api_count is not None and len(rows) >= api_count:
+            break
+        offset += len(batch)
+        if offset >= 10000:
+            raise RuntimeError("VOBI open-installment result unexpectedly reached 10,000-row offset cap")
+
+    return rows, api_count if api_count is not None else len(rows)
 
 
 def _money_sum(items, bill_type):
@@ -90,17 +132,20 @@ def _flow_class(event):
     counterparty = _normalized(event.get("counterparty"))
     text = f"{project} {description} {counterparty}"
 
+    # A purchase paid by credit card remains operational/admin. Only true
+    # financing movements belong in the financial bucket.
     financial_terms = (
-        "sicoob",
+        "boleto sicoob",
         "antecip",
         "emprestimo",
         "financiamento",
-        "parcelamento",
-        "cartao de credito",
+        "amortizacao",
+        "parcelamento facil",
+        "capital de giro",
         "iof",
         "juros",
         "tarifa bancaria",
-        "capital de giro",
+        "consorcio",
     )
     if any(term in text for term in financial_terms):
         return "financeiro"
@@ -141,18 +186,24 @@ def build_controller_snapshot():
     today = now.date()
     horizon_end = today + timedelta(days=45)
     token = vobi_token()
-    rows, api_count = fetch_installments(token, today - timedelta(days=365), horizon_end)
+    rows, api_count = _fetch_open_installments(token)
     opening_balance, balance_source = fetch_opening_balance(token)
 
     normalized = [normalize_installment(row, today) for row in rows]
     events = []
-    ignored = 0
+    ignored_items = []
     unknown = 0
     missing_date = 0
     paid = 0
     cancelled = 0
 
     for item in normalized:
+        # The 7-day rule is an audit rule, not permission to move a due date.
+        # Forecast cash on the actual due date; overdue open items hit today.
+        if item.get("due_date"):
+            item["effective_date"] = max(today, item["due_date"])
+            item["lead_days_adjusted"] = False
+
         if item["paid"]:
             paid += 1
             continue
@@ -160,7 +211,7 @@ def build_controller_snapshot():
             cancelled += 1
             continue
         if item["ignored"]:
-            ignored += 1
+            ignored_items.append(item)
             continue
         if item["bill_type"] not in {"income", "expense"}:
             unknown += 1
@@ -199,6 +250,10 @@ def build_controller_snapshot():
     inside = [x for x in discipline if x["within_rule"]]
 
     events_45 = [e for e in events if today <= e["effective_date"] <= horizon_end]
+    ignored_45 = [
+        e for e in ignored_items
+        if e.get("effective_date") and today <= e["effective_date"] <= horizon_end
+    ]
     consuming, generating = _project_summary(events_45)
     missing_project = [e for e in events_45 if e["project"] == "Sem obra/projeto"]
     financial_items = [e for e in events_45 if _flow_class(e) == "financeiro"]
@@ -234,12 +289,14 @@ def build_controller_snapshot():
     return {
         "status": "ok",
         "generated_at": now.isoformat(),
-        "source": "VOBI live",
+        "source": "VOBI live - open installments (status 1)",
         "opening_balance_source": balance_source,
         "opening_balance": opening_balance,
         "api_count": api_count,
+        "fetched_open_rows": len(rows),
         "projected_rows": len(events),
-        "ignored_rows": ignored,
+        "ignored_rows": len(ignored_items),
+        "ignored_value_45d": sum(e["amount"] for e in ignored_45 if e.get("bill_type") == "expense"),
         "unknown_type_rows": unknown,
         "missing_date_rows": missing_date,
         "paid_rows": paid,
@@ -256,6 +313,7 @@ def build_controller_snapshot():
         "sep16_items": [_event_view(e) for e in sorted(sep16_items, key=lambda x: -x["amount"])],
         "blumenau_items_45d": [_event_view(e) for e in sorted(blumenau_items, key=lambda x: (x["effective_date"], x["bill_type"], -x["amount"]))],
         "sao_jose_items_45d": [_event_view(e) for e in sorted(sao_jose_items, key=lambda x: (x["effective_date"], x["bill_type"], -x["amount"]))],
+        "excluded_items_45d": [_event_view(e) for e in sorted(ignored_45, key=lambda x: (x["effective_date"], -x["amount"]))],
         "overdue": {
             "income_count": len(overdue_income),
             "income_value": _money_sum(overdue_income, "income"),
