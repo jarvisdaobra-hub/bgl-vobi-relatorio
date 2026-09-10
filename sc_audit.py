@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from reporting import TZ, _normalized, fetch_installments, normalize_installment, vobi_token
+from reporting import TZ, _normalized, normalize_installment, vobi_get, vobi_token
 
 
 def _view(item):
@@ -16,13 +16,41 @@ def _view(item):
     }
 
 
+def _fetch_beyond_count(token, initial_date, end_date):
+    limit = 1000
+    offset = 0
+    rows = []
+    reported_count = None
+    # Do not stop at payload.count because VOBI appears to cap it at 10,000.
+    while len(rows) < 50000:
+        payload = vobi_get(
+            "financial/installments",
+            token,
+            params={
+                "limit": limit,
+                "offset": offset,
+                "where[initialDate]": initial_date.isoformat(),
+                "where[endDate]": end_date.isoformat(),
+            },
+        )
+        batch = payload.get("rows", []) if isinstance(payload, dict) else []
+        if reported_count is None and isinstance(payload, dict):
+            reported_count = payload.get("count")
+        if not batch:
+            break
+        rows.extend(batch)
+        offset += len(batch)
+        if len(batch) < limit:
+            break
+    return rows, reported_count
+
+
 def build_sc_audit():
     now = datetime.now(TZ)
     today = now.date()
     end = datetime(2026, 9, 30).date()
     token = vobi_token()
-    # Query only the target window so the VOBI 10k result cap cannot hide current entries.
-    rows, api_count = fetch_installments(token, today, end)
+    rows, api_count = _fetch_beyond_count(token, today, end)
     items = [normalize_installment(row, today) for row in rows]
 
     open_expenses = [
@@ -62,7 +90,8 @@ def build_sc_audit():
         "generated_at": now.isoformat(),
         "period_start": today.isoformat(),
         "period_end": end.isoformat(),
-        "api_count": api_count,
+        "api_reported_count": api_count,
+        "fetched_rows": len(rows),
         "open_expense_count": len(open_expenses),
         "blumenau_total": sum(float(i.get("amount") or 0) for i in blumenau),
         "sao_jose_total": sum(float(i.get("amount") or 0) for i in sao_jose),
