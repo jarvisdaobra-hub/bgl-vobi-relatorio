@@ -1,5 +1,6 @@
 import hmac
 import os
+import threading
 import time
 from functools import wraps
 
@@ -10,6 +11,8 @@ from reporting import generate_report, run_job, safe_log_summary, startup_smoke
 
 app = Flask(__name__)
 _CACHE = {"html": None, "data": None, "created": 0.0}
+_CONTROLLER_REFRESH = {"created": 0.0, "generated_at": None, "status": "never"}
+_CONTROLLER_REFRESH_LOCK = threading.Lock()
 
 
 def configured(name):
@@ -150,6 +153,18 @@ def controller_log_summary(snapshot):
     }
 
 
+def refresh_controller_snapshot():
+    snapshot = build_controller_snapshot()
+    summary = controller_log_summary(snapshot)
+    app.logger.warning("CONTROLLER_SNAPSHOT %s", safe_log_summary(summary))
+    _CONTROLLER_REFRESH.update(
+        created=time.time(),
+        generated_at=snapshot.get("generated_at"),
+        status=snapshot.get("status", "unknown"),
+    )
+    return snapshot
+
+
 try:
     STARTUP_SMOKE = startup_smoke()
     app.logger.warning("STARTUP_SMOKE %s", safe_log_summary(STARTUP_SMOKE))
@@ -175,8 +190,7 @@ except Exception as exc:
     app.logger.exception("REPORT_SMOKE failed")
 
 try:
-    CONTROLLER_SNAPSHOT = build_controller_snapshot()
-    app.logger.warning("CONTROLLER_SNAPSHOT %s", safe_log_summary(controller_log_summary(CONTROLLER_SNAPSHOT)))
+    CONTROLLER_SNAPSHOT = refresh_controller_snapshot()
 except Exception as exc:
     CONTROLLER_SNAPSHOT = {"status": "failed", "error_type": type(exc).__name__}
     app.logger.exception("CONTROLLER_SNAPSHOT failed")
@@ -200,6 +214,34 @@ def health():
         controller_open_rows=CONTROLLER_SNAPSHOT.get("fetched_open_rows"),
         sample_key_count=len(STARTUP_SMOKE.get("sample_keys", [])),
     )
+
+
+@app.get("/controller/refresh")
+def controller_refresh_public():
+    min_seconds = max(60, int(os.getenv("CONTROLLER_REFRESH_MIN_SECONDS", "300")))
+    age = time.time() - float(_CONTROLLER_REFRESH.get("created") or 0.0)
+    if _CONTROLLER_REFRESH.get("generated_at") and age < min_seconds:
+        return jsonify(
+            status=_CONTROLLER_REFRESH.get("status", "ok"),
+            refreshed=False,
+            generated_at=_CONTROLLER_REFRESH.get("generated_at"),
+        )
+
+    if not _CONTROLLER_REFRESH_LOCK.acquire(blocking=False):
+        return jsonify(status="busy", refreshed=False), 202
+
+    try:
+        snapshot = refresh_controller_snapshot()
+        return jsonify(
+            status=snapshot.get("status", "ok"),
+            refreshed=True,
+            generated_at=snapshot.get("generated_at"),
+        )
+    except Exception as exc:
+        app.logger.exception("CONTROLLER_REFRESH failed")
+        return jsonify(status="failed", error_type=type(exc).__name__), 502
+    finally:
+        _CONTROLLER_REFRESH_LOCK.release()
 
 
 @app.get("/controller/status")
