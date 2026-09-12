@@ -1,3 +1,4 @@
+import json
 import os
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -132,8 +133,6 @@ def _flow_class(event):
     counterparty = _normalized(event.get("counterparty"))
     text = f"{project} {description} {counterparty}"
 
-    # A purchase paid by credit card remains operational/admin. Only true
-    # financing movements belong in the financial bucket.
     financial_terms = (
         "boleto sicoob",
         "antecip",
@@ -181,6 +180,80 @@ def _event_view(e):
     }
 
 
+def _sao_jose_year_end(normalized, today):
+    year_end = today.replace(month=12, day=31)
+    items = []
+    missing_date = []
+    for item in normalized:
+        if item.get("paid") or item.get("cancelled"):
+            continue
+        if item.get("bill_type") not in {"income", "expense"}:
+            continue
+        if "sao jose" not in _normalized(item.get("project")):
+            continue
+        due = item.get("due_date")
+        if not due:
+            missing_date.append(item)
+            continue
+        if due <= year_end:
+            items.append(item)
+
+    incomes = [x for x in items if x["bill_type"] == "income"]
+    expenses = [x for x in items if x["bill_type"] == "expense"]
+    included_expenses = [x for x in expenses if not x.get("ignored")]
+    excluded_expenses = [x for x in expenses if x.get("ignored")]
+
+    def excluded_class(item):
+        text = _normalized(f"{item.get('counterparty') or ''} {item.get('description') or ''}")
+        if "valmor" in text:
+            return "valmor"
+        tax_terms = ("receita federal", "darf", "irpj", "csll", "cofins", "pis", "inss", "fgts", "iss", "tribut")
+        if any(term in text for term in tax_terms):
+            return "tributos"
+        return "outros_excluidos"
+
+    excluded_by_class = {"valmor": 0.0, "tributos": 0.0, "outros_excluidos": 0.0}
+    for item in excluded_expenses:
+        excluded_by_class[excluded_class(item)] += item["amount"]
+
+    monthly = {}
+    for item in items:
+        month = item["due_date"].strftime("%Y-%m")
+        bucket = monthly.setdefault(month, {
+            "income": 0.0,
+            "expense_all": 0.0,
+            "expense_included": 0.0,
+            "expense_excluded": 0.0,
+        })
+        if item["bill_type"] == "income":
+            bucket["income"] += item["amount"]
+        else:
+            bucket["expense_all"] += item["amount"]
+            if item.get("ignored"):
+                bucket["expense_excluded"] += item["amount"]
+            else:
+                bucket["expense_included"] += item["amount"]
+
+    result = {
+        "through": year_end.isoformat(),
+        "open_income_total": _money_sum(incomes, "income"),
+        "open_expense_total_all": _money_sum(expenses, "expense"),
+        "open_expense_controller_included": _money_sum(included_expenses, "expense"),
+        "open_expense_controller_excluded": _money_sum(excluded_expenses, "expense"),
+        "excluded_by_class": excluded_by_class,
+        "net_open_all": _money_sum(incomes, "income") - _money_sum(expenses, "expense"),
+        "net_open_controller": _money_sum(incomes, "income") - _money_sum(included_expenses, "expense"),
+        "monthly": monthly,
+        "top_incomes": [_event_view(x) for x in sorted(incomes, key=lambda x: x["amount"], reverse=True)[:20]],
+        "top_expenses_all": [_event_view(x) for x in sorted(expenses, key=lambda x: x["amount"], reverse=True)[:30]],
+        "excluded_expenses": [_event_view(x) for x in sorted(excluded_expenses, key=lambda x: x["amount"], reverse=True)[:30]],
+        "missing_date_count": len(missing_date),
+        "missing_date_value": sum(x["amount"] for x in missing_date),
+    }
+    print("SAO_JOSE_YEAR_END " + json.dumps(result, ensure_ascii=False, separators=(",", ":")), flush=True)
+    return result
+
+
 def build_controller_snapshot():
     now = datetime.now(TZ)
     today = now.date()
@@ -190,6 +263,7 @@ def build_controller_snapshot():
     opening_balance, balance_source = fetch_opening_balance(token)
 
     normalized = [normalize_installment(row, today) for row in rows]
+    sao_jose_year_end = _sao_jose_year_end(normalized, today)
     events = []
     ignored_items = []
     unknown = 0
@@ -198,8 +272,6 @@ def build_controller_snapshot():
     cancelled = 0
 
     for item in normalized:
-        # The 7-day rule is an audit rule, not permission to move a due date.
-        # Forecast cash on the actual due date; overdue open items hit today.
         if item.get("due_date"):
             item["effective_date"] = max(today, item["due_date"])
             item["lead_days_adjusted"] = False
@@ -301,6 +373,7 @@ def build_controller_snapshot():
         "missing_date_rows": missing_date,
         "paid_rows": paid,
         "cancelled_rows": cancelled,
+        "sao_jose_year_end": sao_jose_year_end,
         "windows": windows,
         "overall_45d": {
             "minimum_balance": minimum_balance,
