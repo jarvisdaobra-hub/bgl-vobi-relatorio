@@ -121,26 +121,44 @@ def personnel_advances_to_sep30(snapshot):
 
 
 def controller_log_summary(snapshot):
-    overall = snapshot.get("overall_45d", {}) if isinstance(snapshot, dict) else {}
-    windows = snapshot.get("windows", {}) if isinstance(snapshot, dict) else {}
+    if not isinstance(snapshot, dict):
+        return {"status": "failed"}
+
+    overall = snapshot.get("overall_45d", {})
+    windows = snapshot.get("windows", {})
+    excluded = sorted(
+        snapshot.get("excluded_items_45d", []) or [],
+        key=lambda x: float(x.get("amount") or 0),
+        reverse=True,
+    )[:15]
+
     return {
         "status": snapshot.get("status"),
         "generated_at": snapshot.get("generated_at"),
         "source": snapshot.get("source"),
+        "opening_balance_source": snapshot.get("opening_balance_source"),
+        "opening_balance": snapshot.get("opening_balance"),
         "api_count": snapshot.get("api_count"),
         "fetched_open_rows": snapshot.get("fetched_open_rows"),
         "projected_rows": snapshot.get("projected_rows"),
         "ignored_rows": snapshot.get("ignored_rows"),
         "ignored_value_45d": snapshot.get("ignored_value_45d"),
+        "unknown_type_rows": snapshot.get("unknown_type_rows"),
+        "missing_date_rows": snapshot.get("missing_date_rows"),
+        "paid_rows": snapshot.get("paid_rows"),
+        "cancelled_rows": snapshot.get("cancelled_rows"),
         "personnel_advances_to_sep30": personnel_advances_to_sep30(snapshot),
         "windows": {
             key: {
+                "days": value.get("days"),
+                "end": value.get("end"),
                 "income": value.get("income"),
                 "expense": value.get("expense"),
                 "net": value.get("net"),
                 "closing_balance": value.get("closing_balance"),
                 "minimum_balance": value.get("minimum_balance"),
                 "minimum_balance_date": value.get("minimum_balance_date"),
+                "required_cash": value.get("required_cash"),
             }
             for key, value in windows.items()
         },
@@ -150,6 +168,15 @@ def controller_log_summary(snapshot):
             "required_cash": overall.get("required_cash"),
             "final_balance_45d": overall.get("final_balance_45d"),
         },
+        "flow_45d": snapshot.get("flow_45d"),
+        "overdue": snapshot.get("overdue"),
+        "payment_rule": snapshot.get("payment_rule"),
+        "projects_45d": snapshot.get("projects_45d"),
+        "possible_duplicates": snapshot.get("possible_duplicates"),
+        "top_expenses_30d": snapshot.get("top_expenses_30d"),
+        "financial_items_45d": (snapshot.get("financial_items_45d") or [])[:20],
+        "top_excluded_items_45d": excluded,
+        "not_available_from_current_vobi_snapshot": snapshot.get("not_available_from_current_vobi_snapshot"),
     }
 
 
