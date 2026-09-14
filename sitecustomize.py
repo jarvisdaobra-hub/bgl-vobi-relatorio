@@ -7,81 +7,40 @@ def _probe():
         return
     try:
         from reporting import vobi_get, vobi_token
-
         token = vobi_token()
-        base_params = {"limit": 500, "offset": 0, "where[idInstallmentStatus]": 2}
-        payload = vobi_get("financial/installments", token, params=base_params)
-        rows = payload.get("rows", []) if isinstance(payload, dict) else []
-
-        payment_type_values = sorted({r.get("idPaymentType") for r in rows if r.get("idPaymentType") is not None})
+        seed = vobi_get(
+            "financial/installments",
+            token,
+            params={"limit": 500, "offset": 0, "where[idInstallmentStatus]": 2},
+        )
+        rows = seed.get("rows", []) if isinstance(seed, dict) else []
         bank_values = sorted({r.get("idPaymentBankAccount") for r in rows if r.get("idPaymentBankAccount") is not None})
-        nested_bill_types = sorted({
-            (r.get("payment") or {}).get("billType")
-            for r in rows
-            if isinstance(r.get("payment"), dict) and (r.get("payment") or {}).get("billType") is not None
-        })
-
+        null_bank_in_sample = sum(1 for r in rows if r.get("idPaymentBankAccount") is None)
         tests = []
-        for value in payment_type_values:
-            p = vobi_get(
+        for value in bank_values:
+            payload = vobi_get(
                 "financial/installments",
                 token,
-                params={
-                    "limit": 100,
-                    "offset": 0,
-                    "where[idInstallmentStatus]": 2,
-                    "where[idPaymentType]": value,
-                },
+                params={"limit": 100, "offset": 0, "where[idPaymentBankAccount]": value},
             )
-            rws = p.get("rows", []) if isinstance(p, dict) else []
+            rws = payload.get("rows", []) if isinstance(payload, dict) else []
+            returned = sorted({r.get("idPaymentBankAccount") for r in rws if r.get("idPaymentBankAccount") is not None})
             tests.append({
-                "filter": "where[idPaymentType]",
-                "value": value,
-                "count": p.get("count") if isinstance(p, dict) else None,
+                "count": payload.get("count") if isinstance(payload, dict) else None,
                 "sample_rows": len(rws),
-                "returned_values": sorted({r.get("idPaymentType") for r in rws}),
-                "returned_statuses": sorted({r.get("idInstallmentStatus") for r in rws}),
+                "returned_bank_value_count": len(returned),
+                "filter_respected": returned == [value],
+                "statuses": sorted({r.get("idInstallmentStatus") for r in rws}),
+                "payment_types": sorted({r.get("idPaymentType") for r in rws if r.get("idPaymentType") is not None}),
             })
-
-        bill_filter_tests = []
-        for key in ("where[billType]", "where[paymentType]", "where[payment.billType]"):
-            for value in nested_bill_types:
-                p = vobi_get(
-                    "financial/installments",
-                    token,
-                    params={
-                        "limit": 100,
-                        "offset": 0,
-                        "where[idInstallmentStatus]": 2,
-                        key: value,
-                    },
-                )
-                rws = p.get("rows", []) if isinstance(p, dict) else []
-                returned = sorted({
-                    (r.get("payment") or {}).get("billType")
-                    for r in rws
-                    if isinstance(r.get("payment"), dict) and (r.get("payment") or {}).get("billType") is not None
-                })
-                bill_filter_tests.append({
-                    "filter": key,
-                    "value": value,
-                    "count": p.get("count") if isinstance(p, dict) else None,
-                    "sample_rows": len(rws),
-                    "returned_bill_types": returned,
-                })
-
-        summary = {
-            "status2_count": payload.get("count") if isinstance(payload, dict) else None,
-            "sample_rows": len(rows),
-            "payment_type_values": payment_type_values,
-            "bank_account_value_count": len(bank_values),
-            "nested_bill_types": nested_bill_types,
-            "payment_type_tests": tests,
-            "bill_type_tests": bill_filter_tests,
-        }
-        print("VOBI_SECOND_PARTITION_PROBE " + json.dumps(summary, ensure_ascii=False, separators=(",", ":")), flush=True)
+        print("VOBI_BANK_PARTITION_PROBE " + json.dumps({
+            "seed_rows": len(rows),
+            "bank_value_count": len(bank_values),
+            "null_bank_in_sample": null_bank_in_sample,
+            "tests": tests,
+        }, ensure_ascii=False, separators=(",", ":")), flush=True)
     except Exception as exc:
-        print("VOBI_SECOND_PARTITION_PROBE_FAILED " + json.dumps({"type": type(exc).__name__, "message": str(exc)[:200]}, ensure_ascii=False), flush=True)
+        print("VOBI_BANK_PARTITION_PROBE_FAILED " + json.dumps({"type": type(exc).__name__, "message": str(exc)[:200]}, ensure_ascii=False), flush=True)
 
 
 _probe()
