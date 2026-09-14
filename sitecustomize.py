@@ -10,27 +10,33 @@ def _probe():
 
         token = vobi_token()
         results = []
-        for offset in (0, 9500, 10000, 10500, 15000, 20000):
+        for status in range(1, 13):
             payload = vobi_get(
                 "financial/installments",
                 token,
-                params={"limit": 500, "offset": offset},
+                params={"limit": 100, "offset": 0, "where[idInstallmentStatus]": status},
             )
             rows = payload.get("rows", []) if isinstance(payload, dict) else []
-            paid_dates = sorted(str(r.get("paidDate"))[:10] for r in rows if r.get("paidDate"))
-            due_dates = sorted(str(r.get("dueDate"))[:10] for r in rows if r.get("dueDate"))
+            count = payload.get("count") if isinstance(payload, dict) else None
+            returned_statuses = sorted({r.get("idInstallmentStatus") for r in rows})
+            tail_rows = None
+            if isinstance(count, int) and count >= 9500:
+                tail = vobi_get(
+                    "financial/installments",
+                    token,
+                    params={"limit": 500, "offset": 9500, "where[idInstallmentStatus]": status},
+                )
+                tail_rows = len(tail.get("rows", [])) if isinstance(tail, dict) else None
             results.append({
-                "offset": offset,
-                "count": payload.get("count") if isinstance(payload, dict) else None,
-                "rows": len(rows),
-                "paid_min": paid_dates[0] if paid_dates else None,
-                "paid_max": paid_dates[-1] if paid_dates else None,
-                "due_min": due_dates[0] if due_dates else None,
-                "due_max": due_dates[-1] if due_dates else None,
+                "status": status,
+                "count": count,
+                "sample_rows": len(rows),
+                "returned_statuses": returned_statuses,
+                "rows_at_9500": tail_rows,
             })
-        print("VOBI_PAGINATION_PROBE " + json.dumps(results, ensure_ascii=False, separators=(",", ":")), flush=True)
+        print("VOBI_STATUS_PARTITION_PROBE " + json.dumps(results, ensure_ascii=False, separators=(",", ":")), flush=True)
     except Exception as exc:
-        print("VOBI_PAGINATION_PROBE_FAILED " + json.dumps({"type": type(exc).__name__, "message": str(exc)[:200]}, ensure_ascii=False), flush=True)
+        print("VOBI_STATUS_PARTITION_PROBE_FAILED " + json.dumps({"type": type(exc).__name__, "message": str(exc)[:200]}, ensure_ascii=False), flush=True)
 
 
 _probe()
