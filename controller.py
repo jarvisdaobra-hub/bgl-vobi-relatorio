@@ -167,6 +167,79 @@ def _flow_breakdown(events):
     return buckets
 
 
+def _financing_quality(events):
+    """Separate productive receivables financing from debt service/rollover.
+
+    An anticipation is not treated as a negative signal by itself. It becomes a
+    rollover risk only when the data can prove that a new financial operation is
+    being used to settle prior debt without the underlying operating cycle
+    replenishing cash. VOBI currently does not link each financing item to the
+    NF/measurement and the costs that generated that receivable, so the snapshot
+    reports the evidence available and leaves cycle coverage as not calculable.
+    """
+    anticipation_terms = ("antecip", "nf ")
+    debt_terms = (
+        "boleto sicoob", "emprestimo", "financiamento", "amortizacao",
+        "capital de giro", "parcelamento facil", "consorcio", "iof",
+        "juros", "tarifa bancaria",
+    )
+    anticipation_expense = 0.0
+    other_debt_service = 0.0
+    anticipation_items = []
+    debt_items = []
+
+    for e in events:
+        if e.get("bill_type") != "expense":
+            continue
+        text = _normalized(f"{e.get('counterparty') or ''} {e.get('description') or ''}")
+        if "antecip" in text:
+            anticipation_expense += e["amount"]
+            anticipation_items.append(e)
+        elif any(term in text for term in debt_terms):
+            other_debt_service += e["amount"]
+            debt_items.append(e)
+
+    operating_income = sum(
+        e["amount"] for e in events
+        if e.get("bill_type") == "income" and _flow_class(e) == "operacional"
+    )
+    operating_expense = sum(
+        e["amount"] for e in events
+        if e.get("bill_type") == "expense" and _flow_class(e) == "operacional"
+    )
+
+    return {
+        "policy": (
+            "Antecipacao de NF nao e classificada automaticamente como problema. "
+            "E financiamento produtivo quando a NF/medicao recompõe o custo ja "
+            "desembolsado, quita principal+custo financeiro e preserva a margem. "
+            "Risco de bola de neve existe quando nova divida paga divida anterior "
+            "sem recomposicao suficiente pelo ciclo operacional."
+        ),
+        "operating_income": operating_income,
+        "operating_expense": operating_expense,
+        "operating_net_before_financing": operating_income - operating_expense,
+        "anticipation_debt_service": anticipation_expense,
+        "other_debt_service": other_debt_service,
+        "total_identified_debt_service": anticipation_expense + other_debt_service,
+        "anticipation_items": [_event_view(e) for e in sorted(anticipation_items, key=lambda x: (x["effective_date"], -x["amount"]))],
+        "other_debt_items": [_event_view(e) for e in sorted(debt_items, key=lambda x: (x["effective_date"], -x["amount"]))],
+        "cycle_coverage_status": "NAO CALCULAVEL COM SEGURANCA",
+        "cycle_coverage_formula": (
+            "NF liquida - custo desembolsado da etapa - principal da antecipacao "
+            "- juros/custos financeiros - compromissos para concluir a receita"
+        ),
+        "missing_for_cycle_coverage": [
+            "vinculo entre cada NF/medicao e a antecipacao correspondente",
+            "custo desembolsado atribuivel a cada NF/medicao",
+            "juros/taxas efetivos por operacao quando nao lancados como valor",
+            "compromissos ainda necessarios para concluir a receita da medicao",
+            "margem prevista da etapa/obra",
+        ],
+        "rollover_risk": "NAO INFERIR SEM VINCULO ENTRE DIVIDA, NF/MEDICAO E CUSTOS",
+    }
+
+
 def _event_view(e):
     return {
         "date": e["effective_date"].isoformat() if e.get("effective_date") else None,
@@ -382,6 +455,7 @@ def build_controller_snapshot():
             "final_balance_45d": final_balance,
         },
         "flow_45d": _flow_breakdown(events_45),
+        "financing_quality_45d": _financing_quality(events_45),
         "financial_items_45d": [_event_view(e) for e in sorted(financial_items, key=lambda x: (x["effective_date"], -x["amount"]))],
         "sep16_items": [_event_view(e) for e in sorted(sep16_items, key=lambda x: -x["amount"])],
         "blumenau_items_45d": [_event_view(e) for e in sorted(blumenau_items, key=lambda x: (x["effective_date"], x["bill_type"], -x["amount"]))],
@@ -432,5 +506,7 @@ def build_controller_snapshot():
             "confidence class of each future receipt",
             "responsible person for each financial entry when not returned by endpoint",
             "operational reserve policy",
+            "link between each NF/measurement, its financed costs and its anticipation/loan",
+            "cycle coverage: whether each NF repays spent cost + financing principal/cost + preserves margin",
         ],
     }
