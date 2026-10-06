@@ -431,6 +431,48 @@ def build_controller_snapshot():
         reverse=True,
     )[:12]
 
+    # Caixa Zero: reset from today forward. Historical overdue rows are not
+    # rolled into today, and agreed deferred suppliers stay outside the cash plan.
+    cash_zero_events = []
+    for e in events_45:
+        due = e.get("due_date")
+        if not due or due < today:
+            continue
+        text = _normalized(f"{e.get('counterparty') or ''} {e.get('description') or ''}")
+        if "remabombas" in text or "valmor" in text:
+            continue
+        cash_zero_events.append(e)
+
+    cash_zero_blocks_10d = []
+    for start_offset in range(0, 45, 10):
+        block_start = today + timedelta(days=start_offset)
+        block_end = min(horizon_end, block_start + timedelta(days=9))
+        selected = [
+            e for e in cash_zero_events
+            if block_start <= e["due_date"] <= block_end
+        ]
+        incomes = sorted(
+            [e for e in selected if e["bill_type"] == "income"],
+            key=lambda x: x["amount"],
+            reverse=True,
+        )
+        expenses = sorted(
+            [e for e in selected if e["bill_type"] == "expense"],
+            key=lambda x: x["amount"],
+            reverse=True,
+        )
+        income = sum(e["amount"] for e in incomes)
+        expense = sum(e["amount"] for e in expenses)
+        cash_zero_blocks_10d.append({
+            "start": block_start.isoformat(),
+            "end": block_end.isoformat(),
+            "income": income,
+            "expense": expense,
+            "net": income - expense,
+            "top_incomes": [_event_view(e) for e in incomes[:8]],
+            "top_expenses": [_event_view(e) for e in expenses[:12]],
+        })
+
     return {
         "status": "ok",
         "generated_at": now.isoformat(),
@@ -448,6 +490,7 @@ def build_controller_snapshot():
         "cancelled_rows": cancelled,
         "sao_jose_year_end": sao_jose_year_end,
         "windows": windows,
+        "cash_zero_blocks_10d": cash_zero_blocks_10d,
         "overall_45d": {
             "minimum_balance": minimum_balance,
             "minimum_balance_date": minimum_date.isoformat(),
