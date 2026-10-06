@@ -487,6 +487,14 @@ def build_controller_snapshot():
         "income": cash_zero_15d_income,
         "expense": cash_zero_15d_expense,
         "net": cash_zero_15d_income - cash_zero_15d_expense,
+        "daily_net": [
+            {
+                "date": d.isoformat(),
+                "income": sum(e["amount"] for e in cash_zero_15d_events if e["due_date"] == d and e["bill_type"] == "income"),
+                "expense": sum(e["amount"] for e in cash_zero_15d_events if e["due_date"] == d and e["bill_type"] == "expense"),
+            }
+            for d in [cash_zero_15d_start + timedelta(days=i) for i in range((cash_zero_15d_end - cash_zero_15d_start).days + 1)]
+        ],
         "top_incomes": [_event_view(e) for e in sorted(
             [x for x in cash_zero_15d_events if x["bill_type"] == "income"],
             key=lambda x: x["amount"], reverse=True
