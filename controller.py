@@ -446,7 +446,30 @@ def build_controller_snapshot():
         # in the forward cash projection.
         if e.get("bill_type") == "expense" and e.get("due_date") == today:
             continue
+
+        # Manual receivable correction confirmed by Bruno on 2026-10-06:
+        # São José forecast of R$ 186,131.72 due 2026-10-16 is not valid.
+        # Correct amount is R$ 62,250.00 due 2026-11-06.
+        if (
+            e.get("bill_type") == "income"
+            and "sao jose" in _normalized(e.get("project"))
+            and round(float(e.get("amount") or 0), 2) == 186131.72
+            and e.get("due_date") and e["due_date"].isoformat() == "2026-10-16"
+        ):
+            continue
         cash_zero_events.append(e)
+
+    cash_zero_events.append({
+        "effective_date": datetime(2026, 11, 6).date(),
+        "due_date": datetime(2026, 11, 6).date(),
+        "bill_type": "income",
+        "project": "Execução - Eletrobrás São José/SC",
+        "counterparty": "Eletrobrás CGT Eletrosul",
+        "description": "Caixa Zero - correção manual recebimento São José",
+        "amount": 62250.0,
+        "is_sc": True,
+        "overdue": False,
+    })
 
     # Exact 15-day forward view starts tomorrow because today's opening
     # balance is the real post-payment bank balance supplied by the user.
