@@ -162,6 +162,7 @@ def controller_log_summary(snapshot):
             }
             for key, value in windows.items()
         },
+        "cash_zero_blocks_10d": snapshot.get("cash_zero_blocks_10d"),
         "overall_45d": {
             "minimum_balance": overall.get("minimum_balance"),
             "minimum_balance_date": overall.get("minimum_balance_date"),
