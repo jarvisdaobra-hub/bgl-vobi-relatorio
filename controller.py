@@ -367,7 +367,7 @@ def build_controller_snapshot():
         if item["effective_date"] <= horizon_end:
             events.append(item)
 
-    windows = {str(days): _window(today, days, events, opening_balance) for days in (7, 15, 30, 45)}
+    windows = {str(days): _window(today, days, events, opening_balance) for days in (7, 9, 15, 19, 29, 30, 39, 45)}
     minimum_balance, minimum_date, final_balance = _daily_projection(today, horizon_end, events, opening_balance)
 
     overdue_income = [e for e in events if e["overdue"] and e["bill_type"] == "income"]
