@@ -162,6 +162,7 @@ def controller_log_summary(snapshot):
             }
             for key, value in windows.items()
         },
+        "cash_zero_tomorrow_expenses": snapshot.get("cash_zero_tomorrow_expenses"),
         "cash_zero_15d": snapshot.get("cash_zero_15d"),
         "cash_zero_blocks_10d": snapshot.get("cash_zero_blocks_10d"),
         "overall_45d": {
