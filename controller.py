@@ -441,6 +441,16 @@ def build_controller_snapshot():
         text = _normalized(f"{e.get('counterparty') or ''} {e.get('description') or ''}")
         if "remabombas" in text or "valmor" in text:
             continue
+        # Manual Caixa Zero clean-up confirmed on 2026-10-06:
+        # these items were already paid and must not remain in future cash projection.
+        if (
+            e.get("due_date") == today
+            and (
+                ("nederman do brasil" in text and round(float(e.get("amount") or 0), 2) == 20653.34)
+                or ("vitor mateus de souza correia" in text and round(float(e.get("amount") or 0), 2) == 15680.10)
+            )
+        ):
+            continue
         cash_zero_events.append(e)
 
     cash_zero_blocks_10d = []
