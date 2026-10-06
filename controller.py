@@ -457,6 +457,19 @@ def build_controller_snapshot():
             and e.get("due_date") and e["due_date"].isoformat() == "2026-10-16"
         ):
             continue
+
+        # Manual Caixa Zero adjustments confirmed for 2026-10-07:
+        # disregard Antonio Eufrasio commission; for Lima Esquadrias,
+        # keep only the R$ 5,000 payment and exclude the R$ 12,800 entry.
+        if (
+            e.get("bill_type") == "expense"
+            and e.get("due_date") and e["due_date"].isoformat() == "2026-10-07"
+            and (
+                "antonio eufrasio" in text
+                or ("lima esquadrias" in text and round(float(e.get("amount") or 0), 2) == 12800.00)
+            )
+        ):
+            continue
         cash_zero_events.append(e)
 
     cash_zero_events.append({
