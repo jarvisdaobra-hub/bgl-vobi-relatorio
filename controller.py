@@ -448,6 +448,32 @@ def build_controller_snapshot():
             continue
         cash_zero_events.append(e)
 
+    # Exact 15-day forward view starts tomorrow because today's opening
+    # balance is the real post-payment bank balance supplied by the user.
+    cash_zero_15d_start = today + timedelta(days=1)
+    cash_zero_15d_end = today + timedelta(days=15)
+    cash_zero_15d_events = [
+        e for e in cash_zero_events
+        if e.get("due_date") and cash_zero_15d_start <= e["due_date"] <= cash_zero_15d_end
+    ]
+    cash_zero_15d_income = sum(e["amount"] for e in cash_zero_15d_events if e["bill_type"] == "income")
+    cash_zero_15d_expense = sum(e["amount"] for e in cash_zero_15d_events if e["bill_type"] == "expense")
+    cash_zero_15d = {
+        "start": cash_zero_15d_start.isoformat(),
+        "end": cash_zero_15d_end.isoformat(),
+        "income": cash_zero_15d_income,
+        "expense": cash_zero_15d_expense,
+        "net": cash_zero_15d_income - cash_zero_15d_expense,
+        "top_incomes": [_event_view(e) for e in sorted(
+            [x for x in cash_zero_15d_events if x["bill_type"] == "income"],
+            key=lambda x: x["amount"], reverse=True
+        )[:12]],
+        "top_expenses": [_event_view(e) for e in sorted(
+            [x for x in cash_zero_15d_events if x["bill_type"] == "expense"],
+            key=lambda x: x["amount"], reverse=True
+        )[:16]],
+    }
+
     cash_zero_blocks_10d = []
     for start_offset in range(0, 45, 10):
         block_start = today + timedelta(days=start_offset)
@@ -495,6 +521,7 @@ def build_controller_snapshot():
         "cancelled_rows": cancelled,
         "sao_jose_year_end": sao_jose_year_end,
         "windows": windows,
+        "cash_zero_15d": cash_zero_15d,
         "cash_zero_blocks_10d": cash_zero_blocks_10d,
         "overall_45d": {
             "minimum_balance": minimum_balance,
