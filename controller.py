@@ -552,6 +552,17 @@ def build_controller_snapshot():
         "cancelled_rows": cancelled,
         "sao_jose_year_end": sao_jose_year_end,
         "windows": windows,
+        "cash_zero_tomorrow_expenses": [
+            _event_view(e) for e in sorted(
+                [
+                    x for x in cash_zero_events
+                    if x.get("bill_type") == "expense"
+                    and x.get("due_date") == today + timedelta(days=1)
+                ],
+                key=lambda x: x["amount"],
+                reverse=True,
+            )
+        ],
         "cash_zero_15d": cash_zero_15d,
         "cash_zero_blocks_10d": cash_zero_blocks_10d,
         "overall_45d": {
