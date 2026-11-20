@@ -226,6 +226,42 @@ except Exception as exc:
     app.logger.exception("CONTROLLER_SNAPSHOT failed")
 
 
+def probe_vobi_project_read():
+    """Read-only discovery of documented-looking project resources; no mutations."""
+    from reporting import vobi_get, vobi_token
+    import requests
+    token = vobi_token()
+    checks = []
+    for path in ("projects", "project", "construction/projects", "works"):
+        try:
+            payload = vobi_get(path, token, params={"limit": 100, "offset": 0})
+            if isinstance(payload, dict):
+                rows = next((payload.get(k) for k in ("rows", "data", "items", "projects") if isinstance(payload.get(k), list)), [])
+            elif isinstance(payload, list):
+                rows = payload
+            else:
+                rows = []
+            matches = []
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                display = " ".join(str(item.get(k) or "") for k in ("name", "title", "description", "clientName"))
+                if "mary" in display.casefold() or "vasconcelos" in display.casefold():
+                    matches.append({"id": item.get("id"), "name": item.get("name"), "title": item.get("title")})
+            checks.append({"path": path, "status": "ok", "count_on_page": len(rows), "matches": matches[:5]})
+        except requests.HTTPError as exc:
+            checks.append({"path": path, "http_status": exc.response.status_code})
+        except Exception as exc:
+            checks.append({"path": path, "error_type": type(exc).__name__})
+    return checks
+
+
+try:
+    app.logger.warning("PROJECT_READ_PROBE %s", safe_log_summary(probe_vobi_project_read()))
+except Exception as exc:
+    app.logger.warning("PROJECT_READ_PROBE failed: %s", type(exc).__name__)
+
+
 @app.get("/health")
 def health():
     return jsonify(
